@@ -1,0 +1,278 @@
+import hashlib
+import shutil
+import pytest
+from pathlib import Path
+from mdvault.db import get_connection, init_db
+from mdvault.indexer import (
+    chunk_file,
+    compute_sha256,
+    index_file,
+    index_directory,
+    incremental_index,
+)
+from tests.conftest import FIXTURES_DIR
+
+
+# ---------- chunk_file tests ----------
+
+def test_chunk_file_by_headings():
+    """File with 3 ## sections -> 3 chunks, each contains its heading."""
+    content = (
+        "# Title\n\nIntro paragraph here.\n\n"
+        "## Section One\n\nContent of section one with enough words to be valid "
+        "and this is filler text to exceed twenty words minimum for this chunk.\n\n"
+        "## Section Two\n\nContent of section two with enough words to be valid "
+        "and this is filler text to exceed twenty words minimum for this chunk.\n\n"
+        "## Section Three\n\nContent of section three with enough words to be valid "
+        "and this is filler text to exceed twenty words minimum for this chunk.\n"
+    )
+    chunks = chunk_file(content)
+    assert len(chunks) == 3
+    # First chunk starts with its heading (no overlap prefix)
+    assert chunks[0].startswith("## Section One")
+    # Subsequent chunks have overlap prefix, but must contain their heading
+    assert "## Section Two" in chunks[1]
+    assert "## Section Three" in chunks[2]
+
+
+def test_chunk_file_no_headings():
+    """File without ## -> chunked by paragraph/word limit."""
+    content = "This is a paragraph with enough words. " * 30
+    chunks = chunk_file(content)
+    assert len(chunks) >= 1
+
+
+def test_chunk_max_400_words():
+    """A single paragraph > 400 words -> split into multiple chunks."""
+    content = "## Big Section\n\n" + ("word " * 900)
+    chunks = chunk_file(content)
+    for chunk in chunks:
+        word_count = len(chunk.split())
+        # Allow overlap words (50) on top of 400
+        assert word_count <= 460, f"Chunk too long: {word_count} words"
+
+
+def test_chunk_overlap_50_words():
+    """Chunk N+1 starts with last 50 words of chunk N."""
+    # Create content large enough that chunks have 50+ words each
+    content = "## Big Section\n\n" + ("word " * 900)
+    chunks = chunk_file(content)
+    assert len(chunks) >= 2
+    # Get last 50 words of chunk 0 (before overlap was applied to chunk 1)
+    # After overlap, chunk[1] should start with the last 50 words of the
+    # pre-overlap chunk[0]. Since chunk[0] itself has no overlap prefix,
+    # its words are the original words.
+    words_0 = chunks[0].split()
+    last_50_of_0 = words_0[-50:]
+    words_1 = chunks[1].split()
+    first_50_of_1 = words_1[:50]
+    assert last_50_of_0 == first_50_of_1
+
+
+def test_chunk_minimum_20_words():
+    """Tiny section < 20 words merged into previous chunk."""
+    content = (
+        "## Section One\n\n"
+        "This section has enough words to be a valid chunk on its own and exceeds the minimum. " * 3 + "\n\n"
+        "## Tiny\n\nJust a few words.\n"
+    )
+    chunks = chunk_file(content)
+    # "Tiny" section (<20 words) should be merged, so we get 1 chunk not 2
+    assert len(chunks) == 1
+    assert "Just a few words." in chunks[0]
+
+
+# ---------- compute_sha256 ----------
+
+def test_sha256_file(tmp_path):
+    """Returns hex SHA256 of file content."""
+    f = tmp_path / "test.md"
+    f.write_text("hello world")
+    expected = hashlib.sha256(b"hello world").hexdigest()
+    assert compute_sha256(f) == expected
+
+
+# ---------- index_file ----------
+
+def test_index_file_inserts_rows(db_path, mock_embedder):
+    """After indexing one file: 1 row in files, N rows in chunks, same N in fts and vec."""
+    nginx_path = FIXTURES_DIR / "infra" / "nginx.md"
+    conn = get_connection(db_path)
+    index_file(conn, nginx_path, FIXTURES_DIR, mock_embedder)
+    conn.commit()
+
+    file_count = conn.execute("SELECT COUNT(*) as c FROM files").fetchone()["c"]
+    chunk_count = conn.execute("SELECT COUNT(*) as c FROM chunks").fetchone()["c"]
+    fts_count = conn.execute(
+        "SELECT COUNT(*) as c FROM chunks_fts"
+    ).fetchone()["c"]
+    vec_count = conn.execute("SELECT COUNT(*) as c FROM chunks_vec").fetchone()["c"]
+    conn.close()
+
+    assert file_count == 1
+    assert chunk_count > 0
+    assert fts_count == chunk_count
+    assert vec_count == chunk_count
+
+
+def test_index_file_fts_searchable(db_path, mock_embedder):
+    """After indexing nginx.md, FTS5 query 'reverse proxy' returns a result."""
+    nginx_path = FIXTURES_DIR / "infra" / "nginx.md"
+    conn = get_connection(db_path)
+    index_file(conn, nginx_path, FIXTURES_DIR, mock_embedder)
+    conn.commit()
+
+    rows = conn.execute(
+        "SELECT * FROM chunks_fts WHERE chunks_fts MATCH 'reverse proxy'"
+    ).fetchall()
+    conn.close()
+    assert len(rows) > 0
+
+
+# ---------- index_directory ----------
+
+def test_index_directory_indexes_all_md_files(db_path, mock_embedder):
+    """Indexing fixtures/ creates rows for all .md files."""
+    conn = get_connection(db_path)
+    index_directory(conn, FIXTURES_DIR, mock_embedder)
+    conn.commit()
+
+    file_count = conn.execute("SELECT COUNT(*) as c FROM files").fetchone()["c"]
+    md_files = list(FIXTURES_DIR.rglob("*.md"))
+    conn.close()
+    assert file_count == len(md_files)
+
+
+def test_full_reindex_wipes_and_rebuilds(db_path, mock_embedder):
+    """Index twice -> same count (no duplicates)."""
+    conn = get_connection(db_path)
+    index_directory(conn, FIXTURES_DIR, mock_embedder, full=True)
+    conn.commit()
+    count1 = conn.execute("SELECT COUNT(*) as c FROM files").fetchone()["c"]
+
+    index_directory(conn, FIXTURES_DIR, mock_embedder, full=True)
+    conn.commit()
+    count2 = conn.execute("SELECT COUNT(*) as c FROM files").fetchone()["c"]
+    conn.close()
+
+    assert count1 == count2
+    assert count1 > 0
+
+
+# ---------- incremental_index ----------
+
+def test_incremental_skip_unchanged_file(tmp_path, mock_embedder):
+    """Index -> re-run incremental -> same hash -> file not reindexed (indexed_at unchanged)."""
+    vault = tmp_path / "vault"
+    vault.mkdir()
+    f = vault / "note.md"
+    f.write_text("## Hello\n\nThis is a test note with enough words to pass the minimum chunk size requirement easily.\n")
+
+    db_p = tmp_path / "test.db"
+    init_db(db_p, vault_root=str(vault))
+    conn = get_connection(db_p)
+    index_directory(conn, vault, mock_embedder, full=True)
+    conn.commit()
+
+    ts1 = conn.execute("SELECT indexed_at FROM files").fetchone()["indexed_at"]
+
+    # Incremental -- no changes
+    incremental_index(conn, vault, mock_embedder)
+    conn.commit()
+
+    ts2 = conn.execute("SELECT indexed_at FROM files").fetchone()["indexed_at"]
+    conn.close()
+    assert ts1 == ts2
+
+
+def test_incremental_reindex_modified_file(tmp_path, mock_embedder):
+    """Index -> modify file content -> incremental -> chunks updated."""
+    vault = tmp_path / "vault"
+    vault.mkdir()
+    f = vault / "note.md"
+    f.write_text("## Original\n\nOriginal content that is long enough to form a valid chunk for indexing purposes here.\n")
+
+    db_p = tmp_path / "test.db"
+    init_db(db_p, vault_root=str(vault))
+    conn = get_connection(db_p)
+    index_directory(conn, vault, mock_embedder, full=True)
+    conn.commit()
+
+    old_content = conn.execute("SELECT content FROM chunks LIMIT 1").fetchone()["content"]
+
+    # Modify file
+    f.write_text("## Modified\n\nModified content that is long enough to form a valid chunk for indexing purposes here.\n")
+
+    incremental_index(conn, vault, mock_embedder)
+    conn.commit()
+
+    new_content = conn.execute("SELECT content FROM chunks LIMIT 1").fetchone()["content"]
+    conn.close()
+    assert old_content != new_content
+
+
+def test_incremental_removes_deleted_file(tmp_path, mock_embedder):
+    """Index -> delete file -> incremental -> file+chunks removed from DB."""
+    vault = tmp_path / "vault"
+    vault.mkdir()
+    f = vault / "note.md"
+    f.write_text("## Test\n\nContent that is long enough to form a valid chunk for indexing purposes minimum words.\n")
+
+    db_p = tmp_path / "test.db"
+    init_db(db_p, vault_root=str(vault))
+    conn = get_connection(db_p)
+    index_directory(conn, vault, mock_embedder, full=True)
+    conn.commit()
+    assert conn.execute("SELECT COUNT(*) as c FROM files").fetchone()["c"] == 1
+
+    f.unlink()
+    incremental_index(conn, vault, mock_embedder)
+    conn.commit()
+
+    assert conn.execute("SELECT COUNT(*) as c FROM files").fetchone()["c"] == 0
+    assert conn.execute("SELECT COUNT(*) as c FROM chunks").fetchone()["c"] == 0
+    conn.close()
+
+
+def test_incremental_adds_new_file(tmp_path, mock_embedder):
+    """Index -> add new .md -> incremental -> new file indexed."""
+    vault = tmp_path / "vault"
+    vault.mkdir()
+    f1 = vault / "note1.md"
+    f1.write_text("## First\n\nFirst note content with enough words to pass the minimum chunk threshold easily.\n")
+
+    db_p = tmp_path / "test.db"
+    init_db(db_p, vault_root=str(vault))
+    conn = get_connection(db_p)
+    index_directory(conn, vault, mock_embedder, full=True)
+    conn.commit()
+    assert conn.execute("SELECT COUNT(*) as c FROM files").fetchone()["c"] == 1
+
+    f2 = vault / "note2.md"
+    f2.write_text("## Second\n\nSecond note content with enough words to pass the minimum chunk threshold easily.\n")
+
+    incremental_index(conn, vault, mock_embedder)
+    conn.commit()
+
+    assert conn.execute("SELECT COUNT(*) as c FROM files").fetchone()["c"] == 2
+    conn.close()
+
+
+def test_batch_processing_large_vault(tmp_path, mock_embedder):
+    """Create 150 temp markdown files -> index -> all indexed correctly."""
+    vault = tmp_path / "vault"
+    vault.mkdir()
+    for i in range(150):
+        (vault / f"note_{i:03d}.md").write_text(
+            f"## Note {i}\n\nThis is note number {i} with enough content words to satisfy the minimum chunk size requirement.\n"
+        )
+
+    db_p = tmp_path / "test.db"
+    init_db(db_p, vault_root=str(vault))
+    conn = get_connection(db_p)
+    index_directory(conn, vault, mock_embedder, full=True)
+    conn.commit()
+
+    file_count = conn.execute("SELECT COUNT(*) as c FROM files").fetchone()["c"]
+    conn.close()
+    assert file_count == 150
