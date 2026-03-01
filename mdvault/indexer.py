@@ -205,6 +205,10 @@ def index_directory(
     full: bool = True,
 ) -> None:
     """Index all .md files under vault_root."""
+    if not vault_root.exists():
+        raise ValueError(f"Vault path does not exist: {vault_root}")
+    if not vault_root.is_dir():
+        raise ValueError(f"Vault path is not a directory: {vault_root}")
     md_files = sorted(vault_root.rglob("*.md"))
 
     if full:
