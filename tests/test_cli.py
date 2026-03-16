@@ -68,9 +68,9 @@ def test_search_top_k_flag(tmp_path):
     runner.invoke(app, ["index", str(FIXTURES_DIR), "--db", str(db_file)])
     result = runner.invoke(app, ["search", "nginx", "--db", str(db_file), "--top-k", "3"])
     assert result.exit_code == 0, result.output
-    # Count result markers [1], [2], [3]
-    result_count = result.output.count("[")
-    assert result_count >= 3
+    # Each result is file_path:chunk_idx on its own line
+    result_lines = [line for line in result.output.strip().split("\n") if line and not line.startswith(" ")]
+    assert len(result_lines) >= 3
 
 
 def test_related_command(tmp_path):

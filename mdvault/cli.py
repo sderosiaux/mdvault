@@ -196,7 +196,7 @@ def search(
                 typer.echo("")
             else:
                 flat = " ".join(r["raw_content"].split())[:200]
-                typer.echo(f"[{i}] {r['score']:.3f}  {r['file_path']}:{r['chunk_idx']}")
+                typer.echo(f"{r['file_path']}:{r['chunk_idx']}")
                 typer.echo(f"  {flat}")
                 typer.echo("")
 
