@@ -420,6 +420,60 @@ def read(
         typer.echo(content)
 
 
+@app.command(name="list")
+def list_files(
+    db: str | None = typer.Option(None, "--db", help="Path to database file"),
+    vault: str | None = typer.Option(None, "--vault", help="Filter by vault name"),
+    pattern: str | None = typer.Option(
+        None, "--pattern", help="Glob pattern to filter file paths (e.g. '*.md', 'notes/*')"
+    ),
+    json: bool = typer.Option(False, "--json", "-j", help="Output JSON"),
+):
+    """List indexed files. Filterable by vault and glob pattern."""
+    import fnmatch
+
+    db_path = _resolve_db(db)
+    _require_db(db_path)
+
+    conn = get_connection(db_path)
+    roots = _vault_roots(conn)
+
+    sql = "SELECT file_path FROM files WHERE file_path NOT LIKE 'memory://%'"
+    params: list = []
+    if vault:
+        sql += " AND file_path LIKE ?"
+        params.append(f"{vault}/%")
+    sql += " ORDER BY file_path"
+
+    rows = conn.execute(sql, params).fetchall()
+    conn.close()
+
+    files = [r["file_path"] for r in rows]
+    if pattern:
+        files = [
+            f
+            for f in files
+            if fnmatch.fnmatch(f, pattern) or fnmatch.fnmatch(f.split("/", 1)[-1] if "/" in f else f, pattern)
+        ]
+
+    if json:
+        items = []
+        for fp in files:
+            parts = fp.split("/", 1)
+            items.append(
+                {
+                    "file_path": fp,
+                    "disk_path": _disk_path(fp, roots),
+                    "vault": parts[0] if len(parts) > 1 else None,
+                }
+            )
+        typer.echo(_json.dumps(items))
+    else:
+        typer.echo(f"Files: {len(files)}")
+        for fp in files:
+            typer.echo(f"  {fp}")
+
+
 @app.command()
 def serve(
     db: str | None = typer.Option(None, "--db", help="Path to database file"),

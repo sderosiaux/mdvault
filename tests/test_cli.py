@@ -235,6 +235,43 @@ def test_read_command_not_found(tmp_path):
     assert result.exit_code == 1
 
 
+def test_list_command(tmp_path):
+    """mdvault list shows indexed files."""
+    db_file = tmp_path / "vault.db"
+    runner.invoke(app, ["index", str(FIXTURES_DIR), "--db", str(db_file)])
+    result = runner.invoke(app, ["list", "--db", str(db_file)])
+    assert result.exit_code == 0, result.output
+    assert "Files:" in result.output
+    assert ".md" in result.output
+
+
+def test_list_command_json(tmp_path):
+    """mdvault list --json returns array of file objects."""
+    import json
+
+    db_file = tmp_path / "vault.db"
+    runner.invoke(app, ["index", str(FIXTURES_DIR), "--db", str(db_file)])
+    result = runner.invoke(app, ["list", "--db", str(db_file), "--json"])
+    assert result.exit_code == 0, result.output
+    data = json.loads(result.output)
+    assert isinstance(data, list)
+    assert len(data) > 0
+    assert "file_path" in data[0]
+    assert "disk_path" in data[0]
+    assert "vault" in data[0]
+
+
+def test_list_command_with_pattern(tmp_path):
+    """mdvault list --pattern filters files."""
+    db_file = tmp_path / "vault.db"
+    runner.invoke(app, ["index", str(FIXTURES_DIR), "--db", str(db_file)])
+    result = runner.invoke(app, ["list", "--db", str(db_file), "--pattern", "*nginx*"])
+    assert result.exit_code == 0, result.output
+    # Should have fewer files than total
+    for line in result.output.strip().split("\n")[1:]:  # skip "Files: N" line
+        assert "nginx" in line.lower()
+
+
 def test_search_with_source_flag(tmp_path):
     """mdvault search --source memories works."""
     db_path = tmp_path / "test.db"
