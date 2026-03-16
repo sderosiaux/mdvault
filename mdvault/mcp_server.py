@@ -1,3 +1,4 @@
+import functools
 import os
 from pathlib import Path
 
@@ -18,6 +19,7 @@ def _resolve_db() -> Path:
     return Path(platformdirs.user_data_dir("mdvault")) / "vault.db"
 
 
+@functools.lru_cache(maxsize=1)
 def _get_embedder():
     from model2vec import StaticModel
 

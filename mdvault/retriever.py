@@ -14,28 +14,30 @@ def bm25_search(
 ) -> list[dict]:
     """FTS5 BM25 search. Returns ranked results (best first)."""
     # Convert multi-word query to FTS5 OR semantics so partial matches score
-    fts_query = " OR ".join(
-        f'"{token}"' for token in query.split() if token
-    ) or query
+    tokens = [token.replace('"', '""') for token in query.split() if token]
+    fts_query = " OR ".join(f'"{t}"' for t in tokens) or query
 
-    rows = conn.execute(
-        """
-        SELECT
-            c.id AS chunk_id,
-            f.file_path,
-            c.chunk_idx,
-            c.content,
-            c.raw_content,
-            fts.rank AS bm25_rank
-        FROM chunks_fts fts
-        JOIN chunks c ON c.id = fts.rowid
-        JOIN files f ON f.id = c.file_id
-        WHERE chunks_fts MATCH ?
-        ORDER BY fts.rank ASC
-        LIMIT ?
-        """,
-        (fts_query, top_k),
-    ).fetchall()
+    try:
+        rows = conn.execute(
+            """
+            SELECT
+                c.id AS chunk_id,
+                f.file_path,
+                c.chunk_idx,
+                c.content,
+                c.raw_content,
+                fts.rank AS bm25_rank
+            FROM chunks_fts fts
+            JOIN chunks c ON c.id = fts.rowid
+            JOIN files f ON f.id = c.file_id
+            WHERE chunks_fts MATCH ?
+            ORDER BY fts.rank ASC
+            LIMIT ?
+            """,
+            (fts_query, top_k),
+        ).fetchall()
+    except sqlite3.OperationalError:
+        rows = []
     return [dict(row) for row in rows]
 
 

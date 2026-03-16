@@ -199,22 +199,20 @@ def index_file(
 ) -> None:
     """Index a single markdown file: insert into files, chunks, chunks_fts, chunks_vec."""
     rel_path = str(file_path.relative_to(vault_root))
-    file_hash = compute_sha256(file_path)
-    content = file_path.read_text(encoding="utf-8")
-    chunks = chunk_file(content)
 
+    # Single read: hash + decode
+    raw = file_path.read_bytes()
+    file_hash = hashlib.sha256(raw).hexdigest()
+    try:
+        content = raw.decode("utf-8")
+    except UnicodeDecodeError:
+        return  # skip non-UTF-8 files
+
+    chunks = chunk_file(content)
     if not chunks:
         return
 
     title = _extract_title(content)
-
-    conn.execute(
-        "INSERT INTO files (file_path, file_hash) VALUES (?, ?)",
-        (rel_path, file_hash),
-    )
-    file_id = conn.execute(
-        "SELECT id FROM files WHERE file_path = ?", (rel_path,)
-    ).fetchone()["id"]
 
     # Build contextualized texts for embedding and FTS
     ctx_texts = []
@@ -222,7 +220,7 @@ def index_file(
         prefix = _context_prefix(rel_path, title, chunk.heading)
         ctx_texts.append(prefix + chunk.content)
 
-    # Embed in batches of 32
+    # Embed before DB writes (most likely failure point)
     all_embeddings = []
     for batch_start in range(0, len(ctx_texts), 32):
         batch = ctx_texts[batch_start : batch_start + 32]
@@ -230,47 +228,60 @@ def index_file(
         all_embeddings.append(batch_embeddings)
     embeddings = np.concatenate(all_embeddings, axis=0)
 
-    for idx, (chunk, ctx_text, embedding) in enumerate(zip(chunks, ctx_texts, embeddings)):
-        cursor = conn.execute(
-            "INSERT INTO chunks (file_id, chunk_idx, content, raw_content) VALUES (?, ?, ?, ?)",
-            (file_id, idx, ctx_text, chunk.content),
-        )
-        chunk_id = cursor.lastrowid
+    # All DB writes in a savepoint for atomicity
+    conn.execute("SAVEPOINT sp_index_file")
+    try:
         conn.execute(
-            "INSERT INTO chunks_fts(rowid, content) VALUES (?, ?)",
-            (chunk_id, ctx_text),
+            "INSERT INTO files (file_path, file_hash) VALUES (?, ?)",
+            (rel_path, file_hash),
         )
-        conn.execute(
-            "INSERT INTO chunks_vec(rowid, embedding) VALUES (?, ?)",
-            (chunk_id, serialize_f32(embedding)),
-        )
+        file_id = conn.execute(
+            "SELECT id FROM files WHERE file_path = ?", (rel_path,)
+        ).fetchone()["id"]
 
-    # Extract and store links
-    link_targets = _extract_links(content, rel_path)
-    for target_path in link_targets:
-        conn.execute(
-            "INSERT INTO links (source_file_id, target_path) VALUES (?, ?)",
-            (file_id, target_path),
-        )
+        for idx, (chunk, ctx_text, embedding) in enumerate(zip(chunks, ctx_texts, embeddings)):
+            cursor = conn.execute(
+                "INSERT INTO chunks (file_id, chunk_idx, content, raw_content) VALUES (?, ?, ?, ?)",
+                (file_id, idx, ctx_text, chunk.content),
+            )
+            chunk_id = cursor.lastrowid
+            conn.execute(
+                "INSERT INTO chunks_fts(rowid, content) VALUES (?, ?)",
+                (chunk_id, ctx_text),
+            )
+            conn.execute(
+                "INSERT INTO chunks_vec(rowid, embedding) VALUES (?, ?)",
+                (chunk_id, serialize_f32(embedding)),
+            )
+
+        # Extract and store links
+        link_targets = _extract_links(content, rel_path)
+        for target_path in link_targets:
+            conn.execute(
+                "INSERT INTO links (source_file_id, target_path) VALUES (?, ?)",
+                (file_id, target_path),
+            )
+
+        conn.execute("RELEASE SAVEPOINT sp_index_file")
+    except Exception:
+        conn.execute("ROLLBACK TO SAVEPOINT sp_index_file")
+        raise
 
 
 def _remove_file(conn: sqlite3.Connection, file_path: str) -> None:
-    """Remove a file and its chunks from all tables (FTS/vec first, then cascade)."""
-    chunk_ids = [
-        row["id"]
-        for row in conn.execute(
-            "SELECT c.id FROM chunks c JOIN files f ON c.file_id = f.id WHERE f.file_path = ?",
-            (file_path,),
-        ).fetchall()
-    ]
-    if chunk_ids:
-        placeholders = ",".join("?" * len(chunk_ids))
-        conn.execute(
-            f"DELETE FROM chunks_fts WHERE rowid IN ({placeholders})", chunk_ids
-        )
-        conn.execute(
-            f"DELETE FROM chunks_vec WHERE rowid IN ({placeholders})", chunk_ids
-        )
+    """Remove a file and its chunks from all tables (FTS/vec via subquery, then cascade)."""
+    conn.execute(
+        "DELETE FROM chunks_fts WHERE rowid IN ("
+        "  SELECT c.id FROM chunks c JOIN files f ON c.file_id = f.id WHERE f.file_path = ?"
+        ")",
+        (file_path,),
+    )
+    conn.execute(
+        "DELETE FROM chunks_vec WHERE rowid IN ("
+        "  SELECT c.id FROM chunks c JOIN files f ON c.file_id = f.id WHERE f.file_path = ?"
+        ")",
+        (file_path,),
+    )
     conn.execute("DELETE FROM files WHERE file_path = ?", (file_path,))
 
 
@@ -288,20 +299,9 @@ def index_directory(
     md_files = sorted(vault_root.rglob("*.md"))
 
     if full:
-        # Wipe existing data
-        existing_chunks = [
-            row["id"] for row in conn.execute("SELECT id FROM chunks").fetchall()
-        ]
-        if existing_chunks:
-            placeholders = ",".join("?" * len(existing_chunks))
-            conn.execute(
-                f"DELETE FROM chunks_fts WHERE rowid IN ({placeholders})",
-                existing_chunks,
-            )
-            conn.execute(
-                f"DELETE FROM chunks_vec WHERE rowid IN ({placeholders})",
-                existing_chunks,
-            )
+        # Wipe existing data via subqueries (no variable limit)
+        conn.execute("DELETE FROM chunks_fts WHERE rowid IN (SELECT id FROM chunks)")
+        conn.execute("DELETE FROM chunks_vec WHERE rowid IN (SELECT id FROM chunks)")
         conn.execute("DELETE FROM chunks")
         conn.execute("DELETE FROM files")
         conn.commit()
