@@ -70,6 +70,7 @@ def _require_db(db_path: Path) -> None:
     if not db_path.exists():
         typer.echo("Error: Database not found. Run 'mdvault index' first.", err=True)
         raise typer.Exit(1)
+    init_db(db_path)  # apply migrations for older DBs
 
 
 @app.command()
