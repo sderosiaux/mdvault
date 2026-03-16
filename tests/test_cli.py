@@ -111,3 +111,38 @@ def test_search_vault_tool_returns_correct_schema(tmp_path, monkeypatch):
     assert "chunk_idx" in r
     assert "content" in r
     assert "score" in r
+
+
+# ── MCP tool registration tests ──────────────────────────────────────
+
+
+def _mcp_tool_names() -> dict:
+    import asyncio
+
+    from mdvault.mcp_server import mcp_app
+
+    tools = asyncio.run(mcp_app.list_tools())
+    return {t.name: t for t in tools}
+
+
+def test_mcp_store_memory_tool_exists():
+    """MCP server exposes store_memory tool."""
+    assert "store_memory" in _mcp_tool_names()
+
+
+def test_mcp_delete_memory_tool_exists():
+    """MCP server exposes delete_memory tool."""
+    assert "delete_memory" in _mcp_tool_names()
+
+
+def test_mcp_update_memory_tool_exists():
+    """MCP server exposes update_memory tool."""
+    assert "update_memory" in _mcp_tool_names()
+
+
+def test_mcp_search_vault_has_source_param():
+    """search_vault tool accepts source parameter."""
+    tools = _mcp_tool_names()
+    search_tool = tools["search_vault"]
+    schema = search_tool.inputSchema
+    assert "source" in schema.get("properties", {})
