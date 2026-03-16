@@ -4,6 +4,7 @@ from mdvault.db import get_connection, init_db
 from mdvault.indexer import (
     Chunk,
     _extract_links,
+    _list_md_files,
     chunk_file,
     compute_sha256,
     incremental_index,
@@ -443,3 +444,66 @@ def test_links_removed_on_file_delete(tmp_path, mock_embedder):
     # Links from a.md should be gone (CASCADE)
     assert conn.execute("SELECT COUNT(*) as c FROM links").fetchone()["c"] == 0
     conn.close()
+
+
+# ---------- _list_md_files ----------
+
+
+def test_list_md_files_respects_gitignore(tmp_path):
+    """Files in .gitignore are excluded when in a git repo."""
+    vault = tmp_path / "vault"
+    vault.mkdir()
+    (vault / "visible.md").write_text("# Visible\n\nContent here.\n")
+    ignored_dir = vault / "node_modules"
+    ignored_dir.mkdir()
+    (ignored_dir / "dep.md").write_text("# Dep\n\nShould be ignored.\n")
+
+    import subprocess
+
+    subprocess.run(["git", "init"], cwd=vault, capture_output=True, check=True)
+    (vault / ".gitignore").write_text("node_modules/\n")
+    subprocess.run(["git", "add", "."], cwd=vault, capture_output=True, check=True)
+
+    files = _list_md_files(vault)
+    names = [f.name for f in files]
+    assert "visible.md" in names
+    assert "dep.md" not in names
+
+
+def test_list_md_files_fallback_no_git(tmp_path):
+    """Without git, falls back to rglob and finds all .md files."""
+    vault = tmp_path / "vault"
+    vault.mkdir()
+    (vault / "a.md").write_text("# A\n")
+    (vault / "b.md").write_text("# B\n")
+
+    files = _list_md_files(vault)
+    names = {f.name for f in files}
+    assert names == {"a.md", "b.md"}
+
+
+# ---------- empty chunks ----------
+
+
+def test_empty_files_not_indexed(tmp_path, mock_embedder):
+    """Files with no meaningful content produce no chunks."""
+    vault = tmp_path / "vault"
+    vault.mkdir()
+    (vault / "empty.md").write_text("")
+    (vault / "whitespace.md").write_text("   \n\n  \n")
+    (vault / "real.md").write_text("## Real\n\nThis has enough words to form a valid chunk for indexing.\n")
+
+    db_p = tmp_path / "test.db"
+    init_db(db_p, vault_root=str(vault))
+    conn = get_connection(db_p)
+    index_directory(conn, vault, mock_embedder, full=True)
+    conn.commit()
+
+    chunk_count = conn.execute("SELECT COUNT(*) as c FROM chunks").fetchone()["c"]
+    conn.close()
+    assert chunk_count > 0  # real.md has chunks
+    # But no empty chunks exist
+    conn = get_connection(db_p)
+    empty = conn.execute("SELECT COUNT(*) as c FROM chunks WHERE trim(raw_content) = ''").fetchone()["c"]
+    conn.close()
+    assert empty == 0

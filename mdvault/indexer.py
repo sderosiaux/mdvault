@@ -2,6 +2,8 @@ import hashlib
 import posixpath
 import re
 import sqlite3
+import subprocess
+import sys
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
@@ -152,6 +154,21 @@ def compute_sha256(file_path: Path) -> str:
     return hashlib.sha256(content).hexdigest()
 
 
+def _list_md_files(vault_root: Path) -> list[Path]:
+    """List .md files under vault_root, respecting .gitignore if in a git repo."""
+    try:
+        result = subprocess.run(
+            ["git", "-C", str(vault_root), "ls-files", "--cached", "--others", "--exclude-standard", "*.md"],
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+        return sorted(vault_root / line for line in result.stdout.splitlines() if line)
+    except (subprocess.CalledProcessError, FileNotFoundError):
+        # Not a git repo or git not installed — fall back to rglob
+        return sorted(vault_root.rglob("*.md"))
+
+
 def _extract_links(content: str, source_rel_path: str) -> list[str]:
     """Extract link targets from markdown content. Returns target paths."""
     targets: set[str] = set()
@@ -163,7 +180,10 @@ def _extract_links(content: str, source_rel_path: str) -> list[str]:
 
     # Standard Markdown links (not images): [text](path.md) or [text](path.md#anchor)
     for m in re.finditer(r"(?<!!)\[([^\]]*)\]\(([^)]+)\)", cleaned):
-        href = m.group(2).split("#")[0].split()[0]
+        href_parts = m.group(2).split("#")[0].split()
+        if not href_parts:
+            continue
+        href = href_parts[0]
         if not href or "://" in href or href.startswith("mailto:"):
             continue
         if not href.endswith(".md"):
@@ -205,6 +225,11 @@ def index_file(
         return  # skip non-UTF-8 files
 
     chunks = chunk_file(content)
+    if not chunks:
+        return
+
+    # Skip files that produce only empty chunks
+    chunks = [c for c in chunks if c.content.strip()]
     if not chunks:
         return
 
@@ -290,7 +315,7 @@ def index_directory(
         raise ValueError(f"Vault path does not exist: {vault_root}")
     if not vault_root.is_dir():
         raise ValueError(f"Vault path is not a directory: {vault_root}")
-    md_files = sorted(vault_root.rglob("*.md"))
+    md_files = _list_md_files(vault_root)
 
     if full:
         # Wipe existing data via subqueries (no variable limit)
@@ -300,12 +325,22 @@ def index_directory(
         conn.execute("DELETE FROM files")
         conn.commit()
 
+    total = len(md_files)
+    show_progress = sys.stderr.isatty() and total > 50
+
     # Process in batches of 100
-    for batch_start in range(0, len(md_files), 100):
+    for batch_start in range(0, total, 100):
         batch = md_files[batch_start : batch_start + 100]
         for file_path in batch:
             index_file(conn, file_path, vault_root, embedder)
         conn.commit()
+        if show_progress:
+            done = min(batch_start + len(batch), total)
+            sys.stderr.write(f"\r  {done:,}/{total:,} files indexed")
+            sys.stderr.flush()
+
+    if show_progress:
+        sys.stderr.write("\n")
 
 
 def incremental_index(
@@ -314,7 +349,7 @@ def incremental_index(
     embedder: Callable[[list[str]], np.ndarray],
 ) -> None:
     """Incremental index: skip unchanged, update modified, add new, remove deleted."""
-    disk_files = sorted(vault_root.rglob("*.md"))
+    disk_files = _list_md_files(vault_root)
     disk_paths = {str(f.relative_to(vault_root)) for f in disk_files}
 
     # Get DB state

@@ -5,6 +5,7 @@ import pytest
 from mdvault.db import get_connection, init_db
 from mdvault.indexer import index_directory
 from mdvault.retriever import (
+    _dedup_results,
     bm25_search,
     expand_query_llm,
     get_total_chunks,
@@ -161,6 +162,49 @@ def test_rrf_k_parameter():
     # Rank 1 in both: 1/(60+1) + 1/(60+1) = 2/61
     expected_score = 2.0 / 61.0
     assert abs(fused[0]["score"] - expected_score) < 1e-6
+
+
+# ---------- _dedup_results ----------
+
+
+def test_dedup_removes_duplicate_content(tmp_path, mock_embedder):
+    """Files with identical content (same hash) are deduplicated in results."""
+    vault = tmp_path / "vault"
+    vault.mkdir()
+    content = "## Same\n\nIdentical content in both files with enough words for a valid chunk.\n"
+    (vault / "a.md").write_text(content)
+    (vault / "b.md").write_text(content)
+    (vault / "c.md").write_text("## Different\n\nThis file has unique content for indexing purposes.\n")
+
+    db_p = tmp_path / "test.db"
+    init_db(db_p, vault_root=str(vault))
+    conn = get_connection(db_p)
+    index_directory(conn, vault, mock_embedder, full=True)
+    conn.commit()
+
+    results = [
+        {"chunk_id": 1, "file_path": "a.md", "chunk_idx": 0, "content": "x", "raw_content": "x", "score": 0.9},
+        {"chunk_id": 2, "file_path": "b.md", "chunk_idx": 0, "content": "x", "raw_content": "x", "score": 0.8},
+        {"chunk_id": 3, "file_path": "c.md", "chunk_idx": 0, "content": "y", "raw_content": "y", "score": 0.7},
+    ]
+    deduped = _dedup_results(results, conn, top_k=5)
+    conn.close()
+    # a.md and b.md have same hash -> only a.md kept
+    assert len(deduped) == 2
+    assert deduped[0]["file_path"] == "a.md"
+    assert deduped[1]["file_path"] == "c.md"
+
+
+def test_dedup_respects_top_k(indexed_db):
+    """Dedup returns at most top_k results."""
+    conn = get_connection(indexed_db)
+    results = [
+        {"chunk_id": i, "file_path": f"fake{i}.md", "chunk_idx": 0, "content": "", "raw_content": "", "score": 0.1}
+        for i in range(1, 20)
+    ]
+    deduped = _dedup_results(results, conn, top_k=3)
+    conn.close()
+    assert len(deduped) == 3
 
 
 # ---------- get_total_chunks ----------

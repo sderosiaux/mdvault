@@ -24,11 +24,18 @@ def _resolve_db(db: str | None = None) -> Path:
     return data_dir / "vault.db"
 
 
+_MODEL_ID = "minishlab/potion-base-8M"
+
+
 def _get_embedder():
     """Load the real model2vec embedder."""
+    # Suppress HF Hub auth warnings when model is already cached
+    cache_dir = Path.home() / ".cache" / "huggingface" / "hub" / f"models--{_MODEL_ID.replace('/', '--')}"
+    if cache_dir.exists():
+        os.environ.setdefault("HF_HUB_OFFLINE", "1")
     from model2vec import StaticModel
 
-    model = StaticModel.from_pretrained("minishlab/potion-base-8M")
+    model = StaticModel.from_pretrained(_MODEL_ID)
 
     def embed(texts: list[str]):
         return model.encode(texts)

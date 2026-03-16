@@ -163,6 +163,35 @@ def expand_query_llm(query: str, model: str = "qwen3:0.6b") -> str | None:
         return None
 
 
+def _dedup_results(results: list[dict], conn: sqlite3.Connection, top_k: int) -> list[dict]:
+    """Deduplicate: one result per unique file content (by file_hash), then one per file_path."""
+    # Build file_hash lookup for all file_paths in results
+    file_paths = list({r["file_path"] for r in results})
+    hash_map: dict[str, str] = {}
+    if file_paths:
+        placeholders = ",".join("?" * len(file_paths))
+        rows = conn.execute(
+            f"SELECT file_path, file_hash FROM files WHERE file_path IN ({placeholders})",
+            file_paths,
+        ).fetchall()
+        hash_map = {row["file_path"]: row["file_hash"] for row in rows}
+
+    seen_hashes: set[str] = set()
+    seen_paths: set[str] = set()
+    deduped: list[dict] = []
+    for r in results:
+        fp = r["file_path"]
+        fh = hash_map.get(fp, fp)  # fallback to path if hash not found
+        if fh in seen_hashes or fp in seen_paths:
+            continue
+        seen_hashes.add(fh)
+        seen_paths.add(fp)
+        deduped.append(r)
+        if len(deduped) >= top_k:
+            break
+    return deduped
+
+
 def hybrid_search(
     conn: sqlite3.Connection,
     query: str,
@@ -184,7 +213,9 @@ def hybrid_search(
 
     query_vec = embedder([vec_query])[0]
     vec_results = vector_search(conn, query_vec, top_k=50)
-    return rrf_fusion(bm25_results, vec_results, top_k=top_k)
+    # Fuse with extra headroom, then dedup by content hash to avoid duplicated files
+    fused = rrf_fusion(bm25_results, vec_results, top_k=top_k * 3)
+    return _dedup_results(fused, conn, top_k)
 
 
 def get_total_chunks(conn: sqlite3.Connection) -> int:
