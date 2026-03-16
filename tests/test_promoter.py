@@ -53,12 +53,11 @@ def test_promote_recurring_good_query(db_path, mock_embedder):
     )
     conn.commit()
 
-    store_memory(
-        conn,
-        "Kafka consumer timeout is controlled by max.poll.interval.ms",
-        mock_embedder,
-        namespace="kb",
-    )
+    # Index a real file so source="files" promotion can find it
+    from mdvault.indexer import index_directory
+    from tests.conftest import FIXTURES_DIR
+
+    index_directory(conn, FIXTURES_DIR, mock_embedder, full=True)
     conn.commit()
 
     promoted = maybe_promote(conn, mock_embedder, max_promotions=3)

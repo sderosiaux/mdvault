@@ -19,12 +19,16 @@ def cluster_recent_queries(
         for row, vec in zip(existing, vecs, strict=True):
             cluster_vecs.append((row["id"], vec))
 
-    # Get recent queries (last 100)
+    # Get unclustered queries since last run
+    last_row = conn.execute("SELECT value FROM vault_config WHERE key = 'last_clustered_query_id'").fetchone()
+    last_id = int(last_row["value"]) if last_row else 0
     rows = conn.execute(
         """SELECT ql.id, ql.query, ql.top_score
         FROM query_log ql
-        ORDER BY ql.created_at DESC
+        WHERE ql.id > ?
+        ORDER BY ql.id ASC
         LIMIT 100""",
+        (last_id,),
     ).fetchall()
 
     if not rows:
@@ -48,7 +52,7 @@ def cluster_recent_queries(
             conn.execute(
                 """UPDATE query_clusters
                 SET query_count = query_count + 1,
-                    avg_score = (avg_score * (query_count - 1) + ?) / query_count,
+                    avg_score = (avg_score * query_count + ?) / (query_count + 1),
                     updated_at = CURRENT_TIMESTAMP
                 WHERE id = ?""",
                 (row["top_score"], best_cluster_id),
@@ -70,6 +74,14 @@ def cluster_recent_queries(
             )
             new_id = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
             cluster_vecs.append((new_id, qvec))
+
+    # Track last processed query ID
+    if rows:
+        max_id = max(r["id"] for r in rows)
+        conn.execute(
+            "INSERT OR REPLACE INTO vault_config (key, value) VALUES (?, ?)",
+            ("last_clustered_query_id", str(max_id)),
+        )
 
 
 def maybe_promote(
@@ -104,6 +116,8 @@ def maybe_promote(
                 row["canonical"],
                 embedder,
                 top_k=1,
+                source="files",
+                _internal=True,
             )
             if results:
                 store_memory(

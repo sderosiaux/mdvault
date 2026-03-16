@@ -10,6 +10,7 @@ from math import log2
 import numpy as np
 
 from mdvault.db import serialize_f32
+from mdvault.memory import CONFIDENCE_BY_SOURCE
 
 
 def bm25_search(
@@ -233,14 +234,14 @@ def _dedup_results(results: list[dict], conn: sqlite3.Connection, top_k: int) ->
 def _memory_weight(conn: sqlite3.Connection, file_id: int) -> float:
     """Compute decay * confidence for a memory."""
     row = conn.execute(
-        "SELECT source, confidence, hit_count, last_hit_at, created_at FROM memory_meta WHERE file_id = ?",
+        "SELECT source, hit_count, last_hit_at, created_at FROM memory_meta WHERE file_id = ?",
         (file_id,),
     ).fetchone()
     if not row:
         return 1.0
 
     # Confidence: base + hit boost
-    base = {"user": 0.7, "agent": 0.5, "promoted": 0.3, "cli": 0.7}.get(row["source"], 0.5)
+    base = CONFIDENCE_BY_SOURCE.get(row["source"], 0.5)
     hit_boost = min(0.3, 0.1 * log2(1 + row["hit_count"]))
     confidence = min(1.0, base + hit_boost)
 
@@ -265,6 +266,7 @@ def hybrid_search(
     expand_model: str = "qwen3:0.6b",
     source: str | None = None,
     namespace: str | None = None,
+    _internal: bool = False,
 ) -> list[dict]:
     """Full hybrid search: BM25 + vector + RRF fusion. Optional LLM query expansion."""
     # BM25 always uses original query (lexical match)
@@ -413,46 +415,52 @@ def hybrid_search(
                         deduped.append(r)
                 deduped.sort(key=lambda r: r.get("score", 0.0), reverse=True)
 
-    # Track hits for returned memories
-    mem_file_ids = set()
-    for r in deduped[:top_k]:
-        if r["file_path"].startswith("memory://"):
-            frow = conn.execute("SELECT id FROM files WHERE file_path = ?", (r["file_path"],)).fetchone()
-            if frow:
-                mem_file_ids.add(frow["id"])
-    if mem_file_ids:
-        placeholders = ",".join("?" * len(mem_file_ids))
-        sql = (
-            "UPDATE memory_meta SET hit_count = hit_count + 1,"
-            f" last_hit_at = CURRENT_TIMESTAMP WHERE file_id IN ({placeholders})"
-        )
-        conn.execute(sql, list(mem_file_ids))
+    if not _internal:
+        # Track hits for returned memories
+        mem_file_ids = set()
+        for r in deduped[:top_k]:
+            if r["file_path"].startswith("memory://"):
+                frow = conn.execute("SELECT id FROM files WHERE file_path = ?", (r["file_path"],)).fetchone()
+                if frow:
+                    mem_file_ids.add(frow["id"])
+        if mem_file_ids:
+            placeholders = ",".join("?" * len(mem_file_ids))
+            sql = (
+                "UPDATE memory_meta SET hit_count = hit_count + 1,"
+                f" last_hit_at = CURRENT_TIMESTAMP WHERE file_id IN ({placeholders})"
+            )
+            conn.execute(sql, list(mem_file_ids))
 
-    # Log query for promotion analysis
-    top_score = deduped[0]["score"] if deduped else 0.0
-    result_count = min(top_k, len(deduped))
-    try:
-        conn.execute(
-            "INSERT INTO query_log (query, top_score, result_count) VALUES (?, ?, ?)",
-            (query, top_score, result_count),
-        )
-        log_id = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
-        conn.execute(
-            "INSERT INTO query_vec (rowid, embedding) VALUES (?, ?)",
-            (log_id, serialize_f32(query_vec)),
-        )
-        # Trigger promotion cycle every 20 queries
-        total_queries = conn.execute("SELECT COUNT(*) as c FROM query_log").fetchone()["c"]
-        if total_queries % 20 == 0:
-            try:
-                from mdvault.promoter import cluster_recent_queries, maybe_promote
+        # Log query for promotion analysis
+        top_score = deduped[0]["score"] if deduped else 0.0
+        result_count = min(top_k, len(deduped))
+        try:
+            conn.execute(
+                "INSERT INTO query_log (query, top_score, result_count) VALUES (?, ?, ?)",
+                (query, top_score, result_count),
+            )
+            log_id = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
+            conn.execute(
+                "INSERT INTO query_vec (rowid, embedding) VALUES (?, ?)",
+                (log_id, serialize_f32(query_vec)),
+            )
+            # Trigger promotion cycle every 20 queries
+            total_queries = conn.execute("SELECT COUNT(*) as c FROM query_log").fetchone()["c"]
+            if total_queries % 20 == 0:
+                try:
+                    from mdvault.promoter import (
+                        cluster_recent_queries,
+                        maybe_promote,
+                    )
 
-                cluster_recent_queries(conn, embedder)
-                maybe_promote(conn, embedder)
-            except Exception:  # noqa: S110
-                pass  # promotion failure should never break search
-    except sqlite3.OperationalError:  # noqa: S110
-        pass  # table may not exist in older DBs
+                    cluster_recent_queries(conn, embedder)
+                    maybe_promote(conn, embedder)
+                except Exception:  # noqa: S110
+                    pass  # promotion failure should never break search
+        except sqlite3.OperationalError:  # noqa: S110
+            pass  # table may not exist in older DBs
+
+        conn.commit()
 
     deduped = [r for r in deduped if "memory://gaps/" not in r.get("file_path", "")]
     return deduped[:top_k]

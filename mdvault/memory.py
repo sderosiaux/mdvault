@@ -9,7 +9,7 @@ import numpy as np
 from mdvault.db import serialize_f32
 from mdvault.indexer import Chunk, chunk_file
 
-_CONFIDENCE_BY_SOURCE = {"user": 0.7, "agent": 0.5, "promoted": 0.3, "cli": 0.7, "api": 0.5}
+CONFIDENCE_BY_SOURCE = {"user": 0.7, "agent": 0.5, "promoted": 0.3, "cli": 0.7, "api": 0.5}
 
 
 def store_memory(
@@ -62,7 +62,7 @@ def store_memory(
         conn.execute("INSERT INTO files (file_path, file_hash) VALUES (?, ?)", (file_path, file_hash))
         file_id = conn.execute("SELECT id FROM files WHERE file_path = ?", (file_path,)).fetchone()["id"]
 
-        confidence = _CONFIDENCE_BY_SOURCE.get(source, 0.5)
+        confidence = CONFIDENCE_BY_SOURCE.get(source, 0.5)
         conn.execute(
             "INSERT INTO memory_meta (file_id, namespace, source, metadata, confidence) VALUES (?, ?, ?, ?, ?)",
             (file_id, namespace, source, meta_json, confidence),
