@@ -371,6 +371,56 @@ def memories(
 
 
 @app.command()
+def read(
+    file_path: str = typer.Argument(..., help="Vault-relative file path (e.g. 'myvault/notes/foo.md')"),
+    db: str | None = typer.Option(None, "--db", help="Path to database file"),
+    json: bool = typer.Option(False, "--json", "-j", help="Output JSON"),
+):
+    """Read the full content of an indexed file."""
+    db_path = _resolve_db(db)
+    _require_db(db_path)
+
+    conn = get_connection(db_path)
+    roots = _vault_roots(conn)
+
+    # Check file exists in index
+    row = conn.execute("SELECT id FROM files WHERE file_path = ?", (file_path,)).fetchone()
+    if not row:
+        conn.close()
+        typer.echo(f"Error: '{file_path}' not found in index.", err=True)
+        raise typer.Exit(1)
+
+    # Get all chunks (raw_content) in order
+    chunks = conn.execute(
+        "SELECT chunk_idx, raw_content FROM chunks WHERE file_id = ? ORDER BY chunk_idx",
+        (row["id"],),
+    ).fetchall()
+    conn.close()
+
+    disk = _disk_path(file_path, roots)
+    content = "\n\n".join(c["raw_content"] for c in chunks)
+
+    if json:
+        typer.echo(
+            _json.dumps(
+                {
+                    "file_path": file_path,
+                    "disk_path": disk,
+                    "chunks": len(chunks),
+                    "content": content,
+                }
+            )
+        )
+    else:
+        typer.echo(f"File: {file_path}")
+        if disk:
+            typer.echo(f"Disk: {disk}")
+        typer.echo(f"Chunks: {len(chunks)}")
+        typer.echo("")
+        typer.echo(content)
+
+
+@app.command()
 def serve(
     db: str | None = typer.Option(None, "--db", help="Path to database file"),
 ):

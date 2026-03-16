@@ -187,6 +187,54 @@ def test_memories_list(tmp_path):
     assert "2" in result.output
 
 
+def test_read_command(tmp_path):
+    """mdvault read returns indexed file content."""
+    db_file = tmp_path / "vault.db"
+    runner.invoke(app, ["index", str(FIXTURES_DIR), "--db", str(db_file)])
+    # Get a file_path from the index
+    from mdvault.db import get_connection
+
+    conn = get_connection(db_file)
+    row = conn.execute("SELECT file_path FROM files LIMIT 1").fetchone()
+    conn.close()
+    fp = row["file_path"]
+
+    result = runner.invoke(app, ["read", fp, "--db", str(db_file)])
+    assert result.exit_code == 0, result.output
+    assert f"File: {fp}" in result.output
+    assert "Chunks:" in result.output
+
+
+def test_read_command_json(tmp_path):
+    """mdvault read --json returns structured output."""
+    import json
+
+    db_file = tmp_path / "vault.db"
+    runner.invoke(app, ["index", str(FIXTURES_DIR), "--db", str(db_file)])
+    from mdvault.db import get_connection
+
+    conn = get_connection(db_file)
+    row = conn.execute("SELECT file_path FROM files LIMIT 1").fetchone()
+    conn.close()
+    fp = row["file_path"]
+
+    result = runner.invoke(app, ["read", fp, "--db", str(db_file), "--json"])
+    assert result.exit_code == 0, result.output
+    data = json.loads(result.output)
+    assert data["file_path"] == fp
+    assert "content" in data
+    assert "chunks" in data
+    assert "disk_path" in data
+
+
+def test_read_command_not_found(tmp_path):
+    """mdvault read with unknown file returns error."""
+    db_file = tmp_path / "vault.db"
+    runner.invoke(app, ["index", str(FIXTURES_DIR), "--db", str(db_file)])
+    result = runner.invoke(app, ["read", "nonexistent/file.md", "--db", str(db_file)])
+    assert result.exit_code == 1
+
+
 def test_search_with_source_flag(tmp_path):
     """mdvault search --source memories works."""
     db_path = tmp_path / "test.db"
