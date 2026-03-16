@@ -182,14 +182,19 @@ def _dedup_results(results: list[dict], conn: sqlite3.Connection, top_k: int) ->
 
     seen_hashes: set[str] = set()
     seen_paths: set[str] = set()
+    seen_suffixes: set[str] = set()
     deduped: list[dict] = []
     for r in results:
         fp = r["file_path"]
         fh = hash_map.get(fp, fp)  # fallback to path if hash not found
-        if fh in seen_hashes or fp in seen_paths:
+        # Dedup by content hash, exact path, or same 2-segment suffix (versioned copies)
+        parts = fp.rsplit("/", 3)
+        suffix = "/".join(parts[-3:]) if len(parts) >= 3 else fp
+        if fh in seen_hashes or fp in seen_paths or suffix in seen_suffixes:
             continue
         seen_hashes.add(fh)
         seen_paths.add(fp)
+        seen_suffixes.add(suffix)
         deduped.append(r)
         if len(deduped) >= top_k:
             break
@@ -218,22 +223,27 @@ def hybrid_search(
     query_vec = embedder([vec_query])[0]
     vec_results = vector_search(conn, query_vec, top_k=50)
     # Fuse with extra headroom, then dedup by content hash to avoid duplicated files
-    fused = rrf_fusion(bm25_results, vec_results, top_k=top_k * 3)
-    deduped = _dedup_results(fused, conn, top_k * 2)
+    fused = rrf_fusion(bm25_results, vec_results, top_k=top_k * 10)
+    deduped = _dedup_results(fused, conn, top_k * 5)
 
-    # Re-rank: boost by filename match ratio (focused files rank higher)
+    # Re-rank: boost by path segment match (filename + parent dirs)
     query_terms = {t.lower() for t in query.split() if len(t) > 2}
     for r in deduped:
-        # Use filename only (most specific signal)
-        filename = r["file_path"].rsplit("/", 1)[-1].rsplit(".", 1)[0]
-        fn_tokens = set(filename.lower().replace("-", " ").replace("_", " ").split())
-        fn_tokens = {t for t in fn_tokens if len(t) > 2}
-        if not fn_tokens:
+        fp = r["file_path"]
+        # Extract all path segments as tokens (dirs + filename without extension)
+        parts = fp.replace("\\", "/").split("/")
+        path_tokens: set[str] = set()
+        for part in parts:
+            seg = part.rsplit(".", 1)[0] if "." in part else part
+            for tok in seg.lower().replace("-", " ").replace("_", " ").split():
+                if len(tok) > 2:
+                    path_tokens.add(tok)
+        if not path_tokens:
             continue
-        matches = len(query_terms & fn_tokens)
+        matches = len(query_terms & path_tokens)
         if matches:
-            ratio = matches / len(fn_tokens)
-            r["score"] = r.get("score", 0.0) + ratio * 0.15
+            ratio = matches / len(query_terms) if query_terms else 0
+            r["score"] = r.get("score", 0.0) + ratio * 0.25
 
     deduped.sort(key=lambda r: r.get("score", 0.0), reverse=True)
     return deduped[:top_k]
