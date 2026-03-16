@@ -80,6 +80,13 @@ def index(
 ):
     """Index a directory of markdown files. Additive by default — multiple vaults can share one DB."""
     vault_root = Path(vault_path).resolve()
+    if not vault_root.exists():
+        typer.echo(f"Error: path does not exist: {vault_root}", err=True)
+        raise typer.Exit(1)
+    if not vault_root.is_dir():
+        typer.echo(f"Error: path is not a directory: {vault_root}", err=True)
+        raise typer.Exit(1)
+
     db_path = _resolve_db(db)
     embedder = _get_embedder()
 
@@ -182,6 +189,8 @@ def search(
         typer.echo(f"Chunks searched: {total}")
         typer.echo("")
 
+        if not results:
+            typer.echo("No results.")
         for i, r in enumerate(results, start=1):
             typer.echo(f"[{i}] {r['file_path']} (chunk {r['chunk_idx']}) — score {r['score']:.3f}")
             typer.echo("─" * 42)
