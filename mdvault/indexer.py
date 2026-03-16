@@ -423,10 +423,14 @@ def index_directory(
         )
         raise ValueError(msg)
 
-    # Register vault root
+    # Register vault root and options
     conn.execute(
         "INSERT OR REPLACE INTO vault_config (key, value) VALUES (?, ?)",
         (f"vault_root:{vault_name}", resolved),
+    )
+    conn.execute(
+        "INSERT OR REPLACE INTO vault_config (key, value) VALUES (?, ?)",
+        (f"vault_opts:{vault_name}", "no_gitignore" if no_gitignore else ""),
     )
 
     md_files = _list_files(vault_root, no_gitignore=no_gitignore)

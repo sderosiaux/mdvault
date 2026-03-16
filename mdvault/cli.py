@@ -119,6 +119,51 @@ def index(
 
 
 @app.command()
+def reindex(
+    db: str | None = typer.Option(None, "--db", help="Path to database file"),
+    full: bool = typer.Option(False, "--full", help="Force full re-index of all vaults"),
+    json: bool = typer.Option(False, "--json", "-j", help="Output JSON"),
+):
+    """Re-index all known vaults using their original paths and options."""
+    db_path = _resolve_db(db)
+    _require_db(db_path)
+
+    conn = get_connection(db_path)
+    roots = _vault_roots(conn)
+    if not roots:
+        conn.close()
+        typer.echo("No vaults registered. Run 'mdvault index <path>' first.", err=True)
+        raise typer.Exit(1)
+
+    # Read per-vault options
+    opts_rows = conn.execute("SELECT key, value FROM vault_config WHERE key LIKE 'vault_opts:%'").fetchall()
+    vault_opts = {row["key"].removeprefix("vault_opts:"): row["value"] for row in opts_rows}
+
+    embedder = _get_embedder()
+    results = []
+    for name, path in sorted(roots.items()):
+        vault_root = Path(path)
+        if not vault_root.exists():
+            typer.echo(f"Warning: {name} ({path}) no longer exists, skipping.", err=True)
+            continue
+        no_gitignore = "no_gitignore" in vault_opts.get(name, "")
+        index_directory(conn, vault_root, embedder, full=full, no_gitignore=no_gitignore)
+        conn.commit()
+        v_files = conn.execute("SELECT COUNT(*) as c FROM files WHERE file_path LIKE ?", (f"{name}/%",)).fetchone()["c"]
+        v_chunks = conn.execute(
+            "SELECT COUNT(*) as c FROM chunks c JOIN files f ON c.file_id = f.id WHERE f.file_path LIKE ?",
+            (f"{name}/%",),
+        ).fetchone()["c"]
+        results.append({"vault": name, "path": path, "files": v_files, "chunks": v_chunks})
+        if not json:
+            typer.echo(f"{name}: {v_files:,} files, {v_chunks:,} chunks")
+
+    conn.close()
+    if json:
+        typer.echo(_json.dumps(results))
+
+
+@app.command()
 def search(
     query: str = typer.Argument(..., help="Search query"),
     db: str | None = typer.Option(None, "--db", help="Path to database file"),
