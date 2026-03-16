@@ -19,7 +19,7 @@ def store_memory(
     metadata: dict | None = None,
 ) -> dict:
     """Store a memory. Auto-chunks if content > 400 words."""
-    mem_id = uuid.uuid4().hex[:8]
+    mem_id = uuid.uuid4().hex[:12]
     file_path = f"memory://{namespace}/{mem_id}"
     file_hash = hashlib.sha256(content.encode()).hexdigest()
     meta_json = json.dumps(metadata or {})
@@ -187,6 +187,10 @@ def delete_memory(
         "DELETE FROM chunks_vec WHERE rowid IN ("
         "  SELECT c.id FROM chunks c JOIN files f ON c.file_id = f.id WHERE f.file_path LIKE ?"
         ")",
+        (pattern,),
+    )
+    conn.execute(
+        "DELETE FROM memory_meta WHERE file_id IN (  SELECT id FROM files WHERE file_path LIKE ?)",
         (pattern,),
     )
     conn.execute("DELETE FROM files WHERE file_path LIKE ?", (pattern,))

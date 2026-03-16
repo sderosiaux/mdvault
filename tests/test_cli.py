@@ -167,7 +167,7 @@ def test_forget_by_id(tmp_path):
     # Extract 8-char hex id from output like "Stored a1b2c3d4 (1 chunks)"
     import re
 
-    match = re.search(r"Stored ([0-9a-f]{8})", result.output)
+    match = re.search(r"Stored ([0-9a-f]{12})", result.output)
     assert match is not None, f"Could not find id in: {result.output}"
     mem_id = match.group(1)
 

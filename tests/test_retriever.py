@@ -362,6 +362,11 @@ def test_hybrid_search_no_filter_returns_all(db_path, mock_embedder):
     store_memory(conn, "A stored memory about databases and infrastructure", mock_embedder, namespace="facts")
     conn.commit()
 
-    results = hybrid_search(conn, "databases", mock_embedder, top_k=10)
-    assert len(results) >= 0  # should not crash, may have both sources
+    results = hybrid_search(conn, "databases infrastructure", mock_embedder, top_k=10)
+    assert len(results) > 0
+    paths = [r["file_path"] for r in results]
+    has_memory = any(p.startswith("memory://") for p in paths)
+    has_file = any(not p.startswith("memory://") for p in paths)
+    assert has_memory, "Expected at least one memory result"
+    assert has_file, "Expected at least one file result"
     conn.close()
