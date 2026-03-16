@@ -145,8 +145,10 @@ def compute_sha256(file_path: Path) -> str:
     return hashlib.sha256(content).hexdigest()
 
 
-def _list_md_files(vault_root: Path) -> list[Path]:
+def _list_md_files(vault_root: Path, no_gitignore: bool = False) -> list[Path]:
     """List .md files under vault_root, respecting .gitignore if in a git repo."""
+    if no_gitignore:
+        return sorted(vault_root.rglob("*.md"))
     try:
         result = subprocess.run(
             [
@@ -219,7 +221,10 @@ def index_file(
     rel_path = f"{vault_root.name}/{file_path.relative_to(vault_root)}"
 
     # Single read: hash + decode
-    raw = file_path.read_bytes()
+    try:
+        raw = file_path.read_bytes()
+    except (FileNotFoundError, OSError):
+        return  # skip broken symlinks or unreadable files
     file_hash = hashlib.sha256(raw).hexdigest()
     try:
         content = raw.decode("utf-8")
@@ -331,6 +336,7 @@ def index_directory(
     vault_root: Path,
     embedder: Callable[[list[str]], np.ndarray],
     full: bool = False,
+    no_gitignore: bool = False,
 ) -> None:
     """Index all .md files under vault_root. Additive by default (per-vault incremental)."""
     if not vault_root.exists():
@@ -358,7 +364,7 @@ def index_directory(
         (f"vault_root:{vault_name}", resolved),
     )
 
-    md_files = _list_md_files(vault_root)
+    md_files = _list_md_files(vault_root, no_gitignore=no_gitignore)
 
     if full:
         _remove_vault_files(conn, vault_name)

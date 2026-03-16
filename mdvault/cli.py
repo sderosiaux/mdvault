@@ -50,6 +50,7 @@ def index(
     vault_path: str = typer.Argument(..., help="Path to markdown vault directory"),
     db: str | None = typer.Option(None, "--db", help="Path to database file"),
     full: bool = typer.Option(False, "--full", help="Force full re-index of this vault (default: additive)"),
+    no_gitignore: bool = typer.Option(False, "--no-gitignore", help="Ignore .gitignore rules (index all .md files)"),
 ):
     """Index a directory of markdown files. Additive by default — multiple vaults can share one DB."""
     vault_root = Path(vault_path).resolve()
@@ -59,7 +60,7 @@ def index(
     init_db(db_path)
     conn = get_connection(db_path)
 
-    index_directory(conn, vault_root, embedder, full=full)
+    index_directory(conn, vault_root, embedder, full=full, no_gitignore=no_gitignore)
     conn.commit()
 
     mode = "full re-index" if full else "indexed"
