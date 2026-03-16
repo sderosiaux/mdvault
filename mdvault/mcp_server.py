@@ -32,13 +32,14 @@ def _get_embedder():
 
 
 @mcp_app.tool()
-def search_vault(query: str, top_k: int = 5) -> dict:
-    """Search the local markdown vault using hybrid BM25 + semantic search."""
+def search_vault(query: str, top_k: int = 5, expand: bool = False) -> dict:
+    """Search the local markdown vault using hybrid BM25 + semantic search.
+    Set expand=True to use local LLM (Ollama) for query expansion."""
     db_path = _resolve_db()
     embedder = _get_embedder()
     conn = get_connection(db_path)
     total = get_total_chunks(conn)
-    results = hybrid_search(conn, query, embedder, top_k=top_k)
+    results = hybrid_search(conn, query, embedder, top_k=top_k, expand=expand)
     conn.close()
 
     return {

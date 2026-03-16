@@ -1,5 +1,8 @@
+import json
 import posixpath
 import sqlite3
+import urllib.error
+import urllib.request
 from typing import Callable
 
 import numpy as np
@@ -129,15 +132,53 @@ def rrf_fusion(
     return results
 
 
+def expand_query_llm(query: str, model: str = "qwen3:0.6b") -> str | None:
+    """Expand query via local Ollama LLM. Returns expanded text or None on failure."""
+    prompt = (
+        f"Expand this search query into a short paragraph (2-3 sentences) that a relevant "
+        f"document might contain. Do not explain, just write the paragraph.\n\n"
+        f"Query: {query}\n\nParagraph:"
+    )
+    payload = json.dumps({
+        "model": model,
+        "prompt": prompt,
+        "stream": False,
+        "options": {"temperature": 0.3, "num_predict": 100},
+    }).encode()
+
+    req = urllib.request.Request(
+        "http://localhost:11434/api/generate",
+        data=payload,
+        headers={"Content-Type": "application/json"},
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            data = json.loads(resp.read())
+            return data.get("response", "").strip() or None
+    except (urllib.error.URLError, TimeoutError, json.JSONDecodeError):
+        return None
+
+
 def hybrid_search(
     conn: sqlite3.Connection,
     query: str,
     embedder: Callable[[list[str]], np.ndarray],
     top_k: int = 5,
+    expand: bool = False,
+    expand_model: str = "qwen3:0.6b",
 ) -> list[dict]:
-    """Full hybrid search: BM25 + vector + RRF fusion."""
+    """Full hybrid search: BM25 + vector + RRF fusion. Optional LLM query expansion."""
+    # BM25 always uses original query (lexical match)
     bm25_results = bm25_search(conn, query, top_k=50)
-    query_vec = embedder([query])[0]
+
+    # Vector search: optionally use expanded query for richer embedding
+    vec_query = query
+    if expand:
+        expanded = expand_query_llm(query, model=expand_model)
+        if expanded:
+            vec_query = f"{query} {expanded}"
+
+    query_vec = embedder([vec_query])[0]
     vec_results = vector_search(conn, query_vec, top_k=50)
     return rrf_fusion(bm25_results, vec_results, top_k=top_k)
 

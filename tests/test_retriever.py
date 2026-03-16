@@ -2,11 +2,13 @@ import pytest
 import numpy as np
 from mdvault.db import get_connection, init_db
 from mdvault.indexer import index_directory
+from unittest.mock import patch
 from mdvault.retriever import (
     bm25_search,
     vector_search,
     rrf_fusion,
     hybrid_search,
+    expand_query_llm,
     get_total_chunks,
     related_notes,
 )
@@ -166,6 +168,34 @@ def test_total_chunks_count(indexed_db):
     conn.close()
     assert total == chunk_count
     assert total > 0
+
+
+# ---------- related_notes ----------
+
+# ---------- expand_query_llm ----------
+
+def test_expand_query_llm_returns_none_when_ollama_unavailable():
+    """When Ollama is not running, expand_query_llm returns None gracefully."""
+    result = expand_query_llm("ssh tunnel", model="nonexistent")
+    assert result is None
+
+
+def test_hybrid_search_expand_flag(indexed_db, mock_embedder):
+    """hybrid_search with expand=True still returns results (falls back if no Ollama)."""
+    conn = get_connection(indexed_db)
+    results = hybrid_search(conn, "nginx", mock_embedder, top_k=3, expand=True)
+    conn.close()
+    # Should still work (expansion fails gracefully, falls back to original query)
+    assert len(results) == 3
+
+
+def test_hybrid_search_with_mock_expansion(indexed_db, mock_embedder):
+    """hybrid_search uses expanded query for vector search when expansion succeeds."""
+    conn = get_connection(indexed_db)
+    with patch("mdvault.retriever.expand_query_llm", return_value="nginx reverse proxy upstream load balancer"):
+        results = hybrid_search(conn, "nginx", mock_embedder, top_k=3, expand=True)
+    conn.close()
+    assert len(results) == 3
 
 
 # ---------- related_notes ----------

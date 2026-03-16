@@ -70,6 +70,8 @@ def search(
     query: str = typer.Argument(..., help="Search query"),
     db: Optional[str] = typer.Option(None, "--db", help="Path to database file"),
     top_k: int = typer.Option(5, "--top-k", help="Number of results to return"),
+    expand: bool = typer.Option(False, "--expand", help="Expand query via local LLM (requires Ollama)"),
+    expand_model: str = typer.Option("qwen3:0.6b", "--expand-model", help="Ollama model for query expansion"),
 ):
     """Search the vault using hybrid BM25 + vector search."""
     db_path = _resolve_db(db)
@@ -80,7 +82,7 @@ def search(
     embedder = _get_embedder()
     conn = get_connection(db_path)
     total = get_total_chunks(conn)
-    results = hybrid_search(conn, query, embedder, top_k=top_k)
+    results = hybrid_search(conn, query, embedder, top_k=top_k, expand=expand, expand_model=expand_model)
     conn.close()
 
     typer.echo(f"Query: {query}")
