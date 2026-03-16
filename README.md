@@ -1,5 +1,7 @@
 # mdvault
 
+[![CI](https://github.com/sderosiaux/mdvault/actions/workflows/ci.yml/badge.svg)](https://github.com/sderosiaux/mdvault/actions/workflows/ci.yml)
+
 CLI + MCP server that indexes a folder of Markdown files into a local SQLite database and exposes **hybrid search** (BM25 + semantic + RRF) directly usable from Claude Code.
 
 Zero infrastructure. Everything lives in a single `.db` file.
@@ -7,11 +9,13 @@ Zero infrastructure. Everything lives in a single `.db` file.
 ## Features
 
 - **Hybrid search** — combines FTS5 BM25 and 256-dim vector search via Reciprocal Rank Fusion
+- **Contextual chunking** — each chunk is prefixed with `[path > title > heading]` for better retrieval ([Anthropic approach](https://www.anthropic.com/news/contextual-retrieval))
+- **Link graph** — parses Markdown links and `[[wikilinks]]`, surfaces backlinks and semantically similar files
+- **Query expansion** — optional local LLM (Ollama) expands queries for richer vector search
 - **Fast embeddings** — [potion-base-8M](https://huggingface.co/minishlab/potion-base-8M) via model2vec, CPU-only, ~30MB
 - **Incremental indexing** — SHA256-based change detection, only reprocesses modified files
-- **MCP server** — Claude Code can search your vault with natural language
-- **Single file** — one `.db` holds everything (FTS5 index + vectors + metadata)
-- **XDG-compliant** — default DB at `~/.local/share/mdvault/vault.db`
+- **MCP server** — Claude Code can search your vault and explore related notes
+- **Single file** — one `.db` holds everything (FTS5 index + vectors + link graph + metadata)
 
 ## Install
 
@@ -39,6 +43,12 @@ mdvault index ~/notes/ --incremental
 # Search
 mdvault search "nginx reverse proxy config"
 mdvault search "ssh tunnel" --top-k 10
+
+# Search with query expansion (requires Ollama running locally)
+mdvault search "ssh tunnel" --expand
+
+# Related notes: links, backlinks, and semantically similar files
+mdvault related path/to/note.md
 
 # Stats
 mdvault stats
@@ -68,10 +78,17 @@ Add to `~/.claude/mcp.json`:
 
 If `VAULT_DB` is omitted, defaults to `~/.local/share/mdvault/vault.db` (Linux) or `~/Library/Application Support/mdvault/vault.db` (macOS).
 
+**MCP tools exposed:**
+
+| Tool | Description |
+|---|---|
+| `search_vault` | Hybrid BM25 + semantic search with optional query expansion |
+| `related_notes` | Links, backlinks, and semantically similar files for a given note |
+
 Once connected, ask Claude Code:
 - *"search my notes for how I configured SSH tunnels"*
 - *"find everything I wrote about postgres replication"*
-- *"look in my vault for nginx timeout errors"*
+- *"what notes are related to my kubernetes setup?"*
 
 ## How it works
 
@@ -88,7 +105,9 @@ Query
     Top-N results with file_path + content excerpt
 ```
 
-Chunking splits files on `##`/`###` headings (max 400 words, 50-word overlap). Files without headings are split by paragraph.
+**Chunking** splits files on `##`/`###` headings (max 400 words, 50-word overlap, small sections merged). Each chunk is prefixed with its document context (`[path > title > heading]`) before embedding and FTS indexing — this improves retrieval by grounding chunks in their source document.
+
+**Query expansion** (opt-in via `--expand`) calls a local Ollama model to generate a short paragraph that a relevant document might contain, then concatenates it with the original query for vector search. BM25 always uses the original query for precise lexical matching.
 
 ## Tech Stack
 
@@ -99,6 +118,8 @@ Chunking splits files on `##`/`###` headings (max 400 words, 50-word overlap). F
 | Full-text search | SQLite FTS5 |
 | MCP server | [mcp](https://github.com/modelcontextprotocol/python-sdk) (official Python SDK) |
 | CLI | [typer](https://typer.tiangolo.com) |
+| Linter | [ruff](https://github.com/astral-sh/ruff) |
+| Query expansion | [Ollama](https://ollama.ai) (optional) |
 
 ## Limitations
 
@@ -113,7 +134,13 @@ Chunking splits files on `##`/`###` headings (max 400 words, 50-word overlap). F
 git clone https://github.com/sderosiaux/mdvault
 cd mdvault
 uv sync --dev
-uv run pytest tests/ -v
+uv run pytest -q
+```
+
+Pre-commit hooks (ruff lint + format) are installed automatically:
+
+```bash
+uv run pre-commit install
 ```
 
 ## License
