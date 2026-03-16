@@ -427,6 +427,31 @@ def test_memory_scoring_applies_decay_and_confidence(db_path, mock_embedder):
             assert scores[path1] > scores[path2], "High confidence + recent should score higher"
 
 
+def test_hybrid_search_triggers_promotion_cycle(db_path, mock_embedder):
+    """After 20 searches, promotion cycle runs (clusters analyzed)."""
+    conn = get_connection(db_path)
+    store_memory(
+        conn,
+        "Fact about databases for searching",
+        mock_embedder,
+        namespace="kb",
+    )
+    conn.commit()
+
+    # Run 20 searches to trigger promotion
+    for _ in range(20):
+        hybrid_search(conn, "databases systems", mock_embedder, top_k=3)
+
+    # query_log should have at least 20 entries (promotion may add more via internal search)
+    count = conn.execute("SELECT COUNT(*) as c FROM query_log").fetchone()["c"]
+    assert count >= 20
+
+    # Clustering should have run (at least 1 cluster)
+    clusters = conn.execute("SELECT COUNT(*) as c FROM query_clusters").fetchone()["c"]
+    assert clusters >= 1
+    conn.close()
+
+
 def test_hybrid_search_no_filter_returns_all(db_path, mock_embedder):
     """Default search (no source filter) returns both files and memories."""
     conn = get_connection(db_path)

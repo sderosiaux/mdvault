@@ -440,6 +440,16 @@ def hybrid_search(
             "INSERT INTO query_vec (rowid, embedding) VALUES (?, ?)",
             (log_id, serialize_f32(query_vec)),
         )
+        # Trigger promotion cycle every 20 queries
+        total_queries = conn.execute("SELECT COUNT(*) as c FROM query_log").fetchone()["c"]
+        if total_queries % 20 == 0:
+            try:
+                from mdvault.promoter import cluster_recent_queries, maybe_promote
+
+                cluster_recent_queries(conn, embedder)
+                maybe_promote(conn, embedder)
+            except Exception:  # noqa: S110
+                pass  # promotion failure should never break search
     except sqlite3.OperationalError:  # noqa: S110
         pass  # table may not exist in older DBs
 
