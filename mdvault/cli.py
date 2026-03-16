@@ -119,6 +119,9 @@ def search(
     expand: bool = typer.Option(False, "--expand", help="Expand query via local LLM (requires Ollama)"),
     expand_model: str = typer.Option("qwen3:0.6b", "--expand-model", help="Ollama model for query expansion"),
     source: str | None = typer.Option(None, "--source", help="Filter: 'files' or 'memories'"),
+    vault: str | None = typer.Option(None, "--vault", help="Filter results by vault name"),
+    paths_only: bool = typer.Option(False, "--paths-only", help="Output unique file paths only"),
+    no_truncate: bool = typer.Option(False, "--no-truncate", help="Show full content (no 500-char limit)"),
     json: bool = typer.Option(False, "--json", "-j", help="Output JSON"),
 ):
     """Search the vault using hybrid BM25 + vector search."""
@@ -135,6 +138,25 @@ def search(
     roots = _vault_roots(conn)
     results = hybrid_search(conn, query, embedder, top_k=top_k, expand=expand, expand_model=expand_model, source=source)
     conn.close()
+
+    if vault:
+        prefix = f"{vault}/"
+        results = [r for r in results if r["file_path"].startswith(prefix)]
+
+    if paths_only:
+        seen: set[str] = set()
+        paths: list[str] = []
+        for r in results:
+            fp = r["file_path"]
+            if fp not in seen:
+                seen.add(fp)
+                paths.append(fp)
+        if json:
+            typer.echo(_json.dumps(paths))
+        else:
+            for p in paths:
+                typer.echo(p)
+        return
 
     if json:
         typer.echo(
@@ -163,7 +185,8 @@ def search(
         for i, r in enumerate(results, start=1):
             typer.echo(f"[{i}] {r['file_path']} (chunk {r['chunk_idx']}) — score {r['score']:.3f}")
             typer.echo("─" * 42)
-            typer.echo(r["raw_content"][:500])
+            content = r["raw_content"] if no_truncate else r["raw_content"][:500]
+            typer.echo(content)
             typer.echo("─" * 42)
             typer.echo("")
 

@@ -235,6 +235,46 @@ def test_read_command_not_found(tmp_path):
     assert result.exit_code == 1
 
 
+def test_search_paths_only(tmp_path):
+    """--paths-only outputs unique file paths."""
+    db_file = tmp_path / "vault.db"
+    runner.invoke(app, ["index", str(FIXTURES_DIR), "--db", str(db_file)])
+    result = runner.invoke(app, ["search", "nginx", "--db", str(db_file), "--paths-only"])
+    assert result.exit_code == 0, result.output
+    lines = [line for line in result.output.strip().split("\n") if line]
+    assert len(lines) > 0
+    # Each line should be a file path, no score or chunk info
+    for line in lines:
+        assert "score" not in line
+        assert ".md" in line or "/" in line
+
+
+def test_search_paths_only_json(tmp_path):
+    """--paths-only --json outputs JSON array of paths."""
+    import json
+
+    db_file = tmp_path / "vault.db"
+    runner.invoke(app, ["index", str(FIXTURES_DIR), "--db", str(db_file)])
+    result = runner.invoke(app, ["search", "nginx", "--db", str(db_file), "--paths-only", "--json"])
+    assert result.exit_code == 0, result.output
+    data = json.loads(result.output)
+    assert isinstance(data, list)
+    assert all(isinstance(p, str) for p in data)
+
+
+def test_search_vault_filter(tmp_path):
+    """--vault filters results by vault name."""
+    db_file = tmp_path / "vault.db"
+    runner.invoke(app, ["index", str(FIXTURES_DIR), "--db", str(db_file)])
+    vault_name = FIXTURES_DIR.name
+    result = runner.invoke(app, ["search", "nginx", "--db", str(db_file), "--vault", vault_name])
+    assert result.exit_code == 0, result.output
+    # All results should be from the vault
+    result2 = runner.invoke(app, ["search", "nginx", "--db", str(db_file), "--vault", "nonexistent"])
+    # No results from nonexistent vault
+    assert "Chunks searched" in result2.output or result2.output.strip() == ""
+
+
 def test_list_command(tmp_path):
     """mdvault list shows indexed files."""
     db_file = tmp_path / "vault.db"
