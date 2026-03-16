@@ -353,6 +353,21 @@ def test_hybrid_search_namespace_filter(db_path, mock_embedder):
     conn.close()
 
 
+def test_hybrid_search_logs_query(indexed_db, mock_embedder):
+    """Each hybrid_search call inserts a row in query_log and query_vec."""
+    conn = get_connection(indexed_db)
+    hybrid_search(conn, "nginx proxy config", mock_embedder, top_k=3)
+
+    log = conn.execute("SELECT * FROM query_log").fetchall()
+    assert len(log) == 1
+    assert log[0]["query"] == "nginx proxy config"
+    assert log[0]["result_count"] == 3
+
+    vec = conn.execute("SELECT rowid FROM query_vec").fetchall()
+    assert len(vec) == 1
+    conn.close()
+
+
 def test_hybrid_search_no_filter_returns_all(db_path, mock_embedder):
     """Default search (no source filter) returns both files and memories."""
     conn = get_connection(db_path)

@@ -382,6 +382,22 @@ def hybrid_search(
                         deduped.append(r)
                 deduped.sort(key=lambda r: r.get("score", 0.0), reverse=True)
 
+    # Log query for promotion analysis
+    top_score = deduped[0]["score"] if deduped else 0.0
+    result_count = min(top_k, len(deduped))
+    try:
+        conn.execute(
+            "INSERT INTO query_log (query, top_score, result_count) VALUES (?, ?, ?)",
+            (query, top_score, result_count),
+        )
+        log_id = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
+        conn.execute(
+            "INSERT INTO query_vec (rowid, embedding) VALUES (?, ?)",
+            (log_id, serialize_f32(query_vec)),
+        )
+    except sqlite3.OperationalError:  # noqa: S110
+        pass  # table may not exist in older DBs
+
     return deduped[:top_k]
 
 
