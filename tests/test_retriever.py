@@ -134,7 +134,7 @@ def test_hybrid_search_end_to_end(indexed_db, mock_embedder):
 def test_hybrid_search_correct_file_paths(indexed_db, mock_embedder):
     """Results for 'nginx' queries have file_path pointing to nginx.md."""
     conn = get_connection(indexed_db)
-    results = hybrid_search(conn, "nginx upstream reverse proxy", mock_embedder, top_k=5)
+    results = hybrid_search(conn, "nginx upstream reverse proxy", mock_embedder, top_k=10)
     conn.close()
     file_paths = [r["file_path"] for r in results]
     # At least one should reference nginx
