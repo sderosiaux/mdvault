@@ -270,7 +270,7 @@ def hybrid_search(
 ) -> list[dict]:
     """Full hybrid search: BM25 + vector + RRF fusion. Optional LLM query expansion."""
     # BM25 always uses original query (lexical match)
-    bm25_results = bm25_search(conn, query, top_k=50, source=source, namespace=namespace)
+    bm25_results = bm25_search(conn, query, top_k=75, source=source, namespace=namespace)
 
     # Vector search: optionally use expanded query for richer embedding
     vec_query = query
@@ -280,7 +280,7 @@ def hybrid_search(
             vec_query = f"{query} {expanded}"
 
     query_vec = embedder([vec_query])[0]
-    vec_results = vector_search(conn, query_vec, top_k=50, source=source, namespace=namespace)
+    vec_results = vector_search(conn, query_vec, top_k=75, source=source, namespace=namespace)
     # Fuse with extra headroom, then dedup by content hash to avoid duplicated files
     fused = rrf_fusion(bm25_results, vec_results, top_k=top_k * 15, k=15)
 
@@ -293,25 +293,27 @@ def hybrid_search(
     bm25_files = {r["file_path"] for r in bm25_results}
     vec_files = {r["file_path"] for r in vec_results}
     dual_files = bm25_files & vec_files
-    # Track vector rank per file for graded semantic relevance boost
+    # Track vector distance per file (min distance = best semantic match)
+    vec_file_dist: dict[str, float] = {}
     vec_file_rank: dict[str, int] = {}
     for i, r in enumerate(vec_results):
         fp = r["file_path"]
         if fp not in vec_file_rank:
             vec_file_rank[fp] = i
+        dist = r.get("distance", 999.0)
+        if fp not in vec_file_dist or dist < vec_file_dist[fp]:
+            vec_file_dist[fp] = dist
+    # Compute cosine similarity boost: convert distance to similarity, scale as bonus
+    # sqlite-vec distance is L2 for normalized vecs: dist in [0, 2], sim = 1 - dist/2
     for r in fused:
         extra = file_counts.get(r["file_path"], 1) - 1
         if extra > 0:
             r["score"] = r.get("score", 0.0) + extra * 0.01
         if r["file_path"] in dual_files:
             r["score"] = r.get("score", 0.0) + 0.05
-        vr = vec_file_rank.get(r["file_path"], 999)
-        if vr < 3:
-            r["score"] = r.get("score", 0.0) + 0.10
-        elif vr < 7:
-            r["score"] = r.get("score", 0.0) + 0.06
-        elif vr < 10:
-            r["score"] = r.get("score", 0.0) + 0.03
+        dist = vec_file_dist.get(r["file_path"], 2.0)
+        sim = max(0.0, 1.0 - dist / 2.0)
+        r["score"] = r.get("score", 0.0) + sim * 0.15
 
     deduped = _dedup_results(fused, conn, top_k * 8)
 
@@ -328,11 +330,33 @@ def hybrid_search(
         raw = file_raw.get(r["file_path"], "")
         covered = sum(1 for t in query_terms if t in raw)
         coverage = covered / len(query_terms) if query_terms else 0
-        # Non-linear: high coverage gets extra boost (overviews cover more terms)
-        boost = coverage * 0.15
+        # Non-linear: squared coverage rewards near-complete matches heavily
+        boost = coverage * coverage * 0.20
         if coverage >= 0.8:
-            boost += 0.10
+            boost += 0.12
+        if coverage >= 1.0:
+            boost += 0.08
         r["score"] = r.get("score", 0.0) + boost
+
+    # Re-rank: boost by heading match (chunk heading from context prefix)
+    for r in deduped:
+        content = r.get("content", "")
+        if content.startswith("[") and "]\n" in content:
+            prefix = content.split("]\n", 1)[0][1:]
+            prefix_parts = [p.strip() for p in prefix.split(">")]
+            # Check all heading parts (not just title) for query term matches
+            if len(prefix_parts) >= 3:
+                heading = prefix_parts[-1]  # last part is the chunk heading
+                heading_tokens = {
+                    tok for tok in heading.lower().replace("-", " ").replace("_", " ").split() if len(tok) > 2
+                }
+                if heading_tokens:
+                    h_matches = sum(
+                        1 for qt in query_terms if any(ht.startswith(qt) or qt.startswith(ht) for ht in heading_tokens)
+                    )
+                    if h_matches:
+                        h_ratio = h_matches / len(query_terms) if query_terms else 0
+                        r["score"] = r.get("score", 0.0) + h_ratio * 0.10
 
     # Re-rank: boost by title match (H1 heading from context prefix)
     for r in deduped:
