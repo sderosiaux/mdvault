@@ -177,22 +177,22 @@ def test_dedup_removes_duplicate_content(tmp_path, mock_embedder):
     (vault / "c.md").write_text("## Different\n\nThis file has unique content for indexing purposes.\n")
 
     db_p = tmp_path / "test.db"
-    init_db(db_p, vault_root=str(vault))
+    init_db(db_p)
     conn = get_connection(db_p)
     index_directory(conn, vault, mock_embedder, full=True)
     conn.commit()
 
     results = [
-        {"chunk_id": 1, "file_path": "a.md", "chunk_idx": 0, "content": "x", "raw_content": "x", "score": 0.9},
-        {"chunk_id": 2, "file_path": "b.md", "chunk_idx": 0, "content": "x", "raw_content": "x", "score": 0.8},
-        {"chunk_id": 3, "file_path": "c.md", "chunk_idx": 0, "content": "y", "raw_content": "y", "score": 0.7},
+        {"chunk_id": 1, "file_path": "vault/a.md", "chunk_idx": 0, "content": "x", "raw_content": "x", "score": 0.9},
+        {"chunk_id": 2, "file_path": "vault/b.md", "chunk_idx": 0, "content": "x", "raw_content": "x", "score": 0.8},
+        {"chunk_id": 3, "file_path": "vault/c.md", "chunk_idx": 0, "content": "y", "raw_content": "y", "score": 0.7},
     ]
     deduped = _dedup_results(results, conn, top_k=5)
     conn.close()
     # a.md and b.md have same hash -> only a.md kept
     assert len(deduped) == 2
-    assert deduped[0]["file_path"] == "a.md"
-    assert deduped[1]["file_path"] == "c.md"
+    assert deduped[0]["file_path"] == "vault/a.md"
+    assert deduped[1]["file_path"] == "vault/c.md"
 
 
 def test_dedup_respects_top_k(indexed_db):
@@ -263,17 +263,17 @@ def test_related_notes_returns_structure(tmp_path, mock_embedder):
     )
 
     db_p = tmp_path / "test.db"
-    init_db(db_p, vault_root=str(vault))
+    init_db(db_p)
     conn = get_connection(db_p)
     index_directory(conn, vault, mock_embedder, full=True)
     conn.commit()
 
-    result = related_notes(conn, "a.md", mock_embedder)
+    result = related_notes(conn, "vault/a.md", mock_embedder)
     conn.close()
 
-    assert result["file_path"] == "a.md"
-    assert "b.md" in result["links"]  # a links to b
-    assert "b.md" in result["backlinks"]  # b wikilinks to a
+    assert result["file_path"] == "vault/a.md"
+    assert "vault/b.md" in result["links"]  # a links to b (standard link)
+    assert "vault/b.md" in result["backlinks"]  # b wikilinks to a
     assert isinstance(result["similar"], list)
 
 
@@ -286,16 +286,16 @@ def test_related_notes_backlinks_by_filename(tmp_path, mock_embedder):
     (vault / "top.md").write_text("# Top\n\n## Content\n\nTop level note with enough words to form a valid chunk.\n")
 
     db_p = tmp_path / "test.db"
-    init_db(db_p, vault_root=str(vault))
+    init_db(db_p)
     conn = get_connection(db_p)
     index_directory(conn, vault, mock_embedder, full=True)
     conn.commit()
 
-    result = related_notes(conn, "top.md", mock_embedder)
+    result = related_notes(conn, "vault/top.md", mock_embedder)
     conn.close()
 
     # [[top]] stored as "top.md", backlink query matches by filename
-    assert "sub/deep.md" in result["backlinks"]
+    assert "vault/sub/deep.md" in result["backlinks"]
 
 
 def test_related_notes_similar_excludes_self(tmp_path, mock_embedder):
@@ -308,13 +308,13 @@ def test_related_notes_similar_excludes_self(tmp_path, mock_embedder):
         )
 
     db_p = tmp_path / "test.db"
-    init_db(db_p, vault_root=str(vault))
+    init_db(db_p)
     conn = get_connection(db_p)
     index_directory(conn, vault, mock_embedder, full=True)
     conn.commit()
 
-    result = related_notes(conn, "x.md", mock_embedder)
+    result = related_notes(conn, "vault/x.md", mock_embedder)
     conn.close()
 
-    assert "x.md" not in result["similar"]
+    assert "vault/x.md" not in result["similar"]
     assert len(result["similar"]) <= 5

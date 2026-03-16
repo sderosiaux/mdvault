@@ -21,13 +21,12 @@ def test_init_db_creates_all_tables(db_path):
     conn.close()
 
 
-def test_vault_config_stores_vault_root(db_path):
-    """vault_config has key vault_root with correct value."""
+def test_vault_config_table_exists(db_path):
+    """vault_config table exists and is initially empty."""
     conn = get_connection(db_path)
-    row = conn.execute("SELECT value FROM vault_config WHERE key = 'vault_root'").fetchone()
+    count = conn.execute("SELECT COUNT(*) as c FROM vault_config").fetchone()["c"]
     conn.close()
-    assert row is not None
-    assert "fixtures" in row["value"]
+    assert count == 0
 
 
 def test_foreign_keys_enabled(db_path):

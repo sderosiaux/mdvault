@@ -5,7 +5,7 @@ import platformdirs
 import typer
 
 from mdvault.db import get_connection, init_db
-from mdvault.indexer import incremental_index, index_directory
+from mdvault.indexer import index_directory
 from mdvault.retriever import get_total_chunks, hybrid_search
 from mdvault.retriever import related_notes as _related_notes
 
@@ -47,24 +47,21 @@ def _get_embedder():
 def index(
     vault_path: str = typer.Argument(..., help="Path to markdown vault directory"),
     db: str | None = typer.Option(None, "--db", help="Path to database file"),
-    incremental: bool = typer.Option(False, "--incremental", help="Incremental index"),
+    full: bool = typer.Option(False, "--full", help="Force full re-index of this vault (default: additive)"),
 ):
-    """Index a directory of markdown files."""
+    """Index a directory of markdown files. Additive by default — multiple vaults can share one DB."""
     vault_root = Path(vault_path).resolve()
     db_path = _resolve_db(db)
     embedder = _get_embedder()
 
-    init_db(db_path, vault_root=str(vault_root))
+    init_db(db_path)
     conn = get_connection(db_path)
 
-    if incremental:
-        incremental_index(conn, vault_root, embedder)
-        conn.commit()
-        typer.echo("Incremental index complete.")
-    else:
-        index_directory(conn, vault_root, embedder, full=True)
-        conn.commit()
-        typer.echo(f"Indexed {vault_root}")
+    index_directory(conn, vault_root, embedder, full=full)
+    conn.commit()
+
+    mode = "full re-index" if full else "indexed"
+    typer.echo(f"{vault_root.name}: {mode}")
 
     file_count = conn.execute("SELECT COUNT(*) as c FROM files").fetchone()["c"]
     chunk_count = conn.execute("SELECT COUNT(*) as c FROM chunks").fetchone()["c"]
@@ -116,7 +113,9 @@ def stats(
         raise typer.Exit(1)
 
     conn = get_connection(db_path)
-    vault_root = conn.execute("SELECT value FROM vault_config WHERE key = 'vault_root'").fetchone()
+    vault_roots = conn.execute(
+        "SELECT key, value FROM vault_config WHERE key LIKE 'vault_root:%' ORDER BY key"
+    ).fetchall()
     file_count = conn.execute("SELECT COUNT(*) as c FROM files").fetchone()["c"]
     chunk_count = get_total_chunks(conn)
     conn.close()
@@ -127,7 +126,12 @@ def stats(
     else:
         size_str = f"{db_size / 1024:.0f} KB"
 
-    typer.echo(f"Vault root    : {vault_root['value'] if vault_root else 'N/A'}")
+    if vault_roots:
+        for vr in vault_roots:
+            name = vr["key"].removeprefix("vault_root:")
+            typer.echo(f"Vault         : {name} → {vr['value']}")
+    else:
+        typer.echo("Vault         : (none)")
     typer.echo(f"DB path       : {db_path}")
     typer.echo(f"Files indexed : {file_count:,}")
     typer.echo(f"Total chunks  : {chunk_count:,}")

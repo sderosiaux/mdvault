@@ -15,15 +15,24 @@ def test_index_command_creates_db(tmp_path):
     assert "Indexed" in result.output or "indexed" in result.output
 
 
-def test_index_incremental_flag(tmp_path):
-    """mdvault index ./fixtures/ --incremental works."""
+def test_index_additive_rerun(tmp_path):
+    """mdvault index twice (additive) works without duplication."""
     db_file = tmp_path / "vault.db"
-    # First full index
     result = runner.invoke(app, ["index", str(FIXTURES_DIR), "--db", str(db_file)])
     assert result.exit_code == 0, result.output
-    # Then incremental
-    result = runner.invoke(app, ["index", str(FIXTURES_DIR), "--db", str(db_file), "--incremental"])
+    # Second run: additive, should not fail or duplicate
+    result = runner.invoke(app, ["index", str(FIXTURES_DIR), "--db", str(db_file)])
     assert result.exit_code == 0, result.output
+
+
+def test_index_full_flag(tmp_path):
+    """mdvault index --full forces re-index."""
+    db_file = tmp_path / "vault.db"
+    result = runner.invoke(app, ["index", str(FIXTURES_DIR), "--db", str(db_file)])
+    assert result.exit_code == 0, result.output
+    result = runner.invoke(app, ["index", str(FIXTURES_DIR), "--db", str(db_file), "--full"])
+    assert result.exit_code == 0, result.output
+    assert "full re-index" in result.output
 
 
 def test_search_command_returns_results(tmp_path):
@@ -72,7 +81,7 @@ def test_related_command(tmp_path):
     (vault / "a.md").write_text("# A\n\n## Content\n\nSee [B](b.md) for reference with enough words to chunk.\n")
     (vault / "b.md").write_text("# B\n\n## Content\n\nNote B with enough words to form a valid chunk for indexing.\n")
     runner.invoke(app, ["index", str(vault), "--db", str(db_file)])
-    result = runner.invoke(app, ["related", "a.md", "--db", str(db_file)])
+    result = runner.invoke(app, ["related", "vault/a.md", "--db", str(db_file)])
     assert result.exit_code == 0, result.output
     assert "Links" in result.output
     assert "Backlinks" in result.output

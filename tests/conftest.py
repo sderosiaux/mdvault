@@ -12,7 +12,7 @@ FIXTURES_DIR = Path(__file__).parent / "fixtures"
 def db_path(tmp_path):
     """Fresh in-file DB per test (sqlite-vec needs file, not :memory: for some ops)."""
     path = tmp_path / "test_vault.db"
-    init_db(path, vault_root=str(FIXTURES_DIR))
+    init_db(path)
     return path
 
 

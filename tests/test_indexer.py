@@ -7,7 +7,6 @@ from mdvault.indexer import (
     _list_md_files,
     chunk_file,
     compute_sha256,
-    incremental_index,
     index_directory,
     index_file,
 )
@@ -125,8 +124,8 @@ def test_index_file_contextual_prefix(db_path, mock_embedder):
 
     row = conn.execute("SELECT content, raw_content FROM chunks LIMIT 1").fetchone()
     conn.close()
-    # content starts with context prefix [path > ...]
-    assert row["content"].startswith("[infra/nginx.md")
+    # content starts with context prefix [vault_name/path > ...]
+    assert row["content"].startswith("[fixtures/infra/nginx.md")
     # raw_content does NOT have the prefix
     assert not row["raw_content"].startswith("[")
 
@@ -171,8 +170,24 @@ def test_index_directory_indexes_all_md_files(db_path, mock_embedder):
     assert file_count == len(md_files)
 
 
-def test_full_reindex_wipes_and_rebuilds(db_path, mock_embedder):
-    """Index twice -> same count (no duplicates)."""
+def test_additive_reindex_no_duplicates(db_path, mock_embedder):
+    """Indexing same vault twice (additive) -> same count (no duplicates)."""
+    conn = get_connection(db_path)
+    index_directory(conn, FIXTURES_DIR, mock_embedder)
+    conn.commit()
+    count1 = conn.execute("SELECT COUNT(*) as c FROM files").fetchone()["c"]
+
+    index_directory(conn, FIXTURES_DIR, mock_embedder)
+    conn.commit()
+    count2 = conn.execute("SELECT COUNT(*) as c FROM files").fetchone()["c"]
+    conn.close()
+
+    assert count1 == count2
+    assert count1 > 0
+
+
+def test_full_reindex_wipes_vault_and_rebuilds(db_path, mock_embedder):
+    """full=True wipes this vault's files, then re-indexes."""
     conn = get_connection(db_path)
     index_directory(conn, FIXTURES_DIR, mock_embedder, full=True)
     conn.commit()
@@ -187,26 +202,26 @@ def test_full_reindex_wipes_and_rebuilds(db_path, mock_embedder):
     assert count1 > 0
 
 
-# ---------- incremental_index ----------
+# ---------- additive indexing ----------
 
 
-def test_incremental_skip_unchanged_file(tmp_path, mock_embedder):
-    """Index -> re-run incremental -> same hash -> file not reindexed (indexed_at unchanged)."""
+def test_additive_skip_unchanged_file(tmp_path, mock_embedder):
+    """Index -> re-run additive -> same hash -> file not reindexed (indexed_at unchanged)."""
     vault = tmp_path / "vault"
     vault.mkdir()
     f = vault / "note.md"
     f.write_text("## Hello\n\nThis is a test note with enough words to pass the chunk size requirement.\n")
 
     db_p = tmp_path / "test.db"
-    init_db(db_p, vault_root=str(vault))
+    init_db(db_p)
     conn = get_connection(db_p)
     index_directory(conn, vault, mock_embedder, full=True)
     conn.commit()
 
     ts1 = conn.execute("SELECT indexed_at FROM files").fetchone()["indexed_at"]
 
-    # Incremental -- no changes
-    incremental_index(conn, vault, mock_embedder)
+    # Additive re-index -- no changes
+    index_directory(conn, vault, mock_embedder)
     conn.commit()
 
     ts2 = conn.execute("SELECT indexed_at FROM files").fetchone()["indexed_at"]
@@ -214,15 +229,15 @@ def test_incremental_skip_unchanged_file(tmp_path, mock_embedder):
     assert ts1 == ts2
 
 
-def test_incremental_reindex_modified_file(tmp_path, mock_embedder):
-    """Index -> modify file content -> incremental -> chunks updated."""
+def test_additive_reindex_modified_file(tmp_path, mock_embedder):
+    """Index -> modify file content -> additive -> chunks updated."""
     vault = tmp_path / "vault"
     vault.mkdir()
     f = vault / "note.md"
     f.write_text("## Original\n\nOriginal content long enough to form a valid chunk for indexing.\n")
 
     db_p = tmp_path / "test.db"
-    init_db(db_p, vault_root=str(vault))
+    init_db(db_p)
     conn = get_connection(db_p)
     index_directory(conn, vault, mock_embedder, full=True)
     conn.commit()
@@ -232,7 +247,7 @@ def test_incremental_reindex_modified_file(tmp_path, mock_embedder):
     # Modify file
     f.write_text("## Modified\n\nModified content long enough to form a valid chunk for indexing.\n")
 
-    incremental_index(conn, vault, mock_embedder)
+    index_directory(conn, vault, mock_embedder)
     conn.commit()
 
     new_content = conn.execute("SELECT raw_content FROM chunks LIMIT 1").fetchone()["raw_content"]
@@ -240,22 +255,22 @@ def test_incremental_reindex_modified_file(tmp_path, mock_embedder):
     assert old_content != new_content
 
 
-def test_incremental_removes_deleted_file(tmp_path, mock_embedder):
-    """Index -> delete file -> incremental -> file+chunks removed from DB."""
+def test_additive_removes_deleted_file(tmp_path, mock_embedder):
+    """Index -> delete file -> additive -> file+chunks removed from DB."""
     vault = tmp_path / "vault"
     vault.mkdir()
     f = vault / "note.md"
     f.write_text("## Test\n\nContent that is long enough to form a valid chunk for indexing purposes minimum words.\n")
 
     db_p = tmp_path / "test.db"
-    init_db(db_p, vault_root=str(vault))
+    init_db(db_p)
     conn = get_connection(db_p)
     index_directory(conn, vault, mock_embedder, full=True)
     conn.commit()
     assert conn.execute("SELECT COUNT(*) as c FROM files").fetchone()["c"] == 1
 
     f.unlink()
-    incremental_index(conn, vault, mock_embedder)
+    index_directory(conn, vault, mock_embedder)
     conn.commit()
 
     assert conn.execute("SELECT COUNT(*) as c FROM files").fetchone()["c"] == 0
@@ -263,15 +278,15 @@ def test_incremental_removes_deleted_file(tmp_path, mock_embedder):
     conn.close()
 
 
-def test_incremental_adds_new_file(tmp_path, mock_embedder):
-    """Index -> add new .md -> incremental -> new file indexed."""
+def test_additive_adds_new_file(tmp_path, mock_embedder):
+    """Index -> add new .md -> additive -> new file indexed."""
     vault = tmp_path / "vault"
     vault.mkdir()
     f1 = vault / "note1.md"
     f1.write_text("## First\n\nFirst note content with enough words to pass the minimum chunk threshold easily.\n")
 
     db_p = tmp_path / "test.db"
-    init_db(db_p, vault_root=str(vault))
+    init_db(db_p)
     conn = get_connection(db_p)
     index_directory(conn, vault, mock_embedder, full=True)
     conn.commit()
@@ -280,7 +295,7 @@ def test_incremental_adds_new_file(tmp_path, mock_embedder):
     f2 = vault / "note2.md"
     f2.write_text("## Second\n\nSecond note content with enough words to pass the minimum chunk threshold easily.\n")
 
-    incremental_index(conn, vault, mock_embedder)
+    index_directory(conn, vault, mock_embedder)
     conn.commit()
 
     assert conn.execute("SELECT COUNT(*) as c FROM files").fetchone()["c"] == 2
@@ -297,7 +312,7 @@ def test_batch_processing_large_vault(tmp_path, mock_embedder):
         )
 
     db_p = tmp_path / "test.db"
-    init_db(db_p, vault_root=str(vault))
+    init_db(db_p)
     conn = get_connection(db_p)
     index_directory(conn, vault, mock_embedder, full=True)
     conn.commit()
@@ -407,7 +422,7 @@ def test_index_file_stores_links(tmp_path, mock_embedder):
     (vault / "c.md").write_text("# Note C\n\n## Content\n\nThis is note C with enough words to form a valid chunk.\n")
 
     db_p = tmp_path / "test.db"
-    init_db(db_p, vault_root=str(vault))
+    init_db(db_p)
     conn = get_connection(db_p)
     index_directory(conn, vault, mock_embedder, full=True)
     conn.commit()
@@ -415,12 +430,12 @@ def test_index_file_stores_links(tmp_path, mock_embedder):
     links = [
         row["target_path"]
         for row in conn.execute(
-            "SELECT target_path FROM links l JOIN files f ON f.id = l.source_file_id WHERE f.file_path = 'a.md'"
+            "SELECT target_path FROM links l JOIN files f ON f.id = l.source_file_id WHERE f.file_path = 'vault/a.md'"
         ).fetchall()
     ]
     conn.close()
-    assert "b.md" in links
-    assert "c.md" in links
+    assert "vault/b.md" in links  # standard link resolved with vault prefix
+    assert "c.md" in links  # wikilink stored as-is
 
 
 def test_links_removed_on_file_delete(tmp_path, mock_embedder):
@@ -431,14 +446,14 @@ def test_links_removed_on_file_delete(tmp_path, mock_embedder):
     (vault / "b.md").write_text("# Note B\n\n## Content\n\nEnough words to form a valid chunk for indexing purposes.\n")
 
     db_p = tmp_path / "test.db"
-    init_db(db_p, vault_root=str(vault))
+    init_db(db_p)
     conn = get_connection(db_p)
     index_directory(conn, vault, mock_embedder, full=True)
     conn.commit()
     assert conn.execute("SELECT COUNT(*) as c FROM links").fetchone()["c"] > 0
 
     (vault / "a.md").unlink()
-    incremental_index(conn, vault, mock_embedder)
+    index_directory(conn, vault, mock_embedder)
     conn.commit()
 
     # Links from a.md should be gone (CASCADE)
@@ -494,7 +509,7 @@ def test_empty_files_not_indexed(tmp_path, mock_embedder):
     (vault / "real.md").write_text("## Real\n\nThis has enough words to form a valid chunk for indexing.\n")
 
     db_p = tmp_path / "test.db"
-    init_db(db_p, vault_root=str(vault))
+    init_db(db_p)
     conn = get_connection(db_p)
     index_directory(conn, vault, mock_embedder, full=True)
     conn.commit()
@@ -507,3 +522,121 @@ def test_empty_files_not_indexed(tmp_path, mock_embedder):
     empty = conn.execute("SELECT COUNT(*) as c FROM chunks WHERE trim(raw_content) = ''").fetchone()["c"]
     conn.close()
     assert empty == 0
+
+
+# ---------- multi-vault ----------
+
+
+def test_multi_vault_additive(tmp_path, mock_embedder):
+    """Indexing two different vaults into same DB keeps both."""
+    vault_a = tmp_path / "blog"
+    vault_a.mkdir()
+    (vault_a / "post.md").write_text("## Blog\n\nA blog post with enough words to form a valid chunk for indexing.\n")
+
+    vault_b = tmp_path / "notes"
+    vault_b.mkdir()
+    (vault_b / "idea.md").write_text("## Idea\n\nAn idea note with enough words to form a valid chunk for indexing.\n")
+
+    db_p = tmp_path / "test.db"
+    init_db(db_p)
+    conn = get_connection(db_p)
+
+    index_directory(conn, vault_a, mock_embedder)
+    conn.commit()
+    assert conn.execute("SELECT COUNT(*) as c FROM files").fetchone()["c"] == 1
+
+    index_directory(conn, vault_b, mock_embedder)
+    conn.commit()
+    assert conn.execute("SELECT COUNT(*) as c FROM files").fetchone()["c"] == 2
+
+    paths = [r["file_path"] for r in conn.execute("SELECT file_path FROM files ORDER BY file_path").fetchall()]
+    conn.close()
+    assert paths == ["blog/post.md", "notes/idea.md"]
+
+
+def test_multi_vault_full_only_wipes_target(tmp_path, mock_embedder):
+    """full=True wipes only the targeted vault, not others."""
+    vault_a = tmp_path / "blog"
+    vault_a.mkdir()
+    (vault_a / "post.md").write_text("## Blog\n\nA blog post with enough words to form a valid chunk for indexing.\n")
+
+    vault_b = tmp_path / "notes"
+    vault_b.mkdir()
+    (vault_b / "idea.md").write_text("## Idea\n\nAn idea note with enough words to form a valid chunk for indexing.\n")
+
+    db_p = tmp_path / "test.db"
+    init_db(db_p)
+    conn = get_connection(db_p)
+
+    index_directory(conn, vault_a, mock_embedder)
+    index_directory(conn, vault_b, mock_embedder)
+    conn.commit()
+    assert conn.execute("SELECT COUNT(*) as c FROM files").fetchone()["c"] == 2
+
+    # Full re-index of blog only
+    index_directory(conn, vault_a, mock_embedder, full=True)
+    conn.commit()
+
+    # notes vault untouched
+    assert conn.execute("SELECT COUNT(*) as c FROM files").fetchone()["c"] == 2
+    assert conn.execute("SELECT COUNT(*) as c FROM files WHERE file_path LIKE 'notes/%'").fetchone()["c"] == 1
+    conn.close()
+
+
+def test_vault_name_collision_raises(tmp_path, mock_embedder):
+    """Two different paths with same directory name raises ValueError."""
+    vault1 = tmp_path / "dir1" / "vault"
+    vault1.mkdir(parents=True)
+    (vault1 / "a.md").write_text("## A\n\nEnough words to form a valid chunk for indexing purposes here.\n")
+
+    vault2 = tmp_path / "dir2" / "vault"
+    vault2.mkdir(parents=True)
+    (vault2 / "b.md").write_text("## B\n\nEnough words to form a valid chunk for indexing purposes here.\n")
+
+    db_p = tmp_path / "test.db"
+    init_db(db_p)
+    conn = get_connection(db_p)
+
+    index_directory(conn, vault1, mock_embedder)
+    conn.commit()
+
+    import pytest
+
+    with pytest.raises(ValueError, match="already used"):
+        index_directory(conn, vault2, mock_embedder)
+    conn.close()
+
+
+def test_file_path_prefixed_with_vault_name(tmp_path, mock_embedder):
+    """file_path in DB is prefixed with vault directory name."""
+    vault = tmp_path / "my-vault"
+    vault.mkdir()
+    (vault / "note.md").write_text("## Note\n\nEnough words to form a valid chunk for indexing purposes here.\n")
+
+    db_p = tmp_path / "test.db"
+    init_db(db_p)
+    conn = get_connection(db_p)
+    index_directory(conn, vault, mock_embedder)
+    conn.commit()
+
+    fp = conn.execute("SELECT file_path FROM files").fetchone()["file_path"]
+    conn.close()
+    assert fp == "my-vault/note.md"
+
+
+def test_vault_root_stored_in_config(tmp_path, mock_embedder):
+    """Vault root is stored in vault_config after indexing."""
+    vault = tmp_path / "docs"
+    vault.mkdir()
+    (vault / "readme.md").write_text("## Readme\n\nEnough words for a valid chunk to be indexed properly here.\n")
+
+    db_p = tmp_path / "test.db"
+    init_db(db_p)
+    conn = get_connection(db_p)
+    index_directory(conn, vault, mock_embedder)
+    conn.commit()
+
+    row = conn.execute("SELECT value FROM vault_config WHERE key = 'vault_root:docs'").fetchone()
+    conn.close()
+    assert row is not None
+    assert "docs" in row["value"]

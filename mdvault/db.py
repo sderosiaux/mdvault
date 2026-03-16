@@ -20,7 +20,7 @@ def get_connection(db_path: str | Path) -> sqlite3.Connection:
     return conn
 
 
-def init_db(db_path: str | Path, vault_root: str) -> None:
+def init_db(db_path: str | Path) -> None:
     conn = get_connection(db_path)
 
     conn.executescript("""
@@ -72,10 +72,6 @@ def init_db(db_path: str | Path, vault_root: str) -> None:
         )
     """)
 
-    conn.execute(
-        "INSERT OR REPLACE INTO vault_config (key, value) VALUES ('vault_root', ?)",
-        (vault_root,),
-    )
     conn.commit()
 
     # Migrate older DBs that lack raw_content column

@@ -158,7 +158,18 @@ def _list_md_files(vault_root: Path) -> list[Path]:
     """List .md files under vault_root, respecting .gitignore if in a git repo."""
     try:
         result = subprocess.run(
-            ["git", "-C", str(vault_root), "ls-files", "--cached", "--others", "--exclude-standard", "*.md"],
+            [
+                "git",
+                "-C",
+                str(vault_root),
+                "-c",
+                "core.quotepath=false",
+                "ls-files",
+                "--cached",
+                "--others",
+                "--exclude-standard",
+                "*.md",
+            ],
             capture_output=True,
             text=True,
             check=True,
@@ -214,7 +225,7 @@ def index_file(
     embedder: Callable[[list[str]], np.ndarray],
 ) -> None:
     """Index a single markdown file: insert into files, chunks, chunks_fts, chunks_vec."""
-    rel_path = str(file_path.relative_to(vault_root))
+    rel_path = f"{vault_root.name}/{file_path.relative_to(vault_root)}"
 
     # Single read: hash + decode
     raw = file_path.read_bytes()
@@ -235,16 +246,18 @@ def index_file(
 
     title = _extract_title(content)
 
-    # Build contextualized texts for embedding and FTS
+    # Build contextualized texts for FTS (with path/title prefix)
     ctx_texts = []
+    raw_texts = []
     for chunk in chunks:
         prefix = _context_prefix(rel_path, title, chunk.heading)
         ctx_texts.append(prefix + chunk.content)
+        raw_texts.append(chunk.content)
 
-    # Embed before DB writes (most likely failure point)
+    # Embed raw_content (without prefix) — prefix hurts vector similarity
     all_embeddings = []
-    for batch_start in range(0, len(ctx_texts), 32):
-        batch = ctx_texts[batch_start : batch_start + 32]
+    for batch_start in range(0, len(raw_texts), 32):
+        batch = raw_texts[batch_start : batch_start + 32]
         batch_embeddings = embedder(batch)
         all_embeddings.append(batch_embeddings)
     embeddings = np.concatenate(all_embeddings, axis=0)
@@ -304,35 +317,90 @@ def _remove_file(conn: sqlite3.Connection, file_path: str) -> None:
     conn.execute("DELETE FROM files WHERE file_path = ?", (file_path,))
 
 
+def _remove_vault_files(conn: sqlite3.Connection, vault_name: str) -> None:
+    """Remove all files (and their chunks/links) belonging to a vault prefix."""
+    pattern = f"{vault_name}/%"
+    conn.execute(
+        "DELETE FROM chunks_fts WHERE rowid IN ("
+        "  SELECT c.id FROM chunks c JOIN files f ON c.file_id = f.id WHERE f.file_path LIKE ?"
+        ")",
+        (pattern,),
+    )
+    conn.execute(
+        "DELETE FROM chunks_vec WHERE rowid IN ("
+        "  SELECT c.id FROM chunks c JOIN files f ON c.file_id = f.id WHERE f.file_path LIKE ?"
+        ")",
+        (pattern,),
+    )
+    conn.execute("DELETE FROM files WHERE file_path LIKE ?", (pattern,))
+
+
 def index_directory(
     conn: sqlite3.Connection,
     vault_root: Path,
     embedder: Callable[[list[str]], np.ndarray],
-    full: bool = True,
+    full: bool = False,
 ) -> None:
-    """Index all .md files under vault_root."""
+    """Index all .md files under vault_root. Additive by default (per-vault incremental)."""
     if not vault_root.exists():
         raise ValueError(f"Vault path does not exist: {vault_root}")
     if not vault_root.is_dir():
         raise ValueError(f"Vault path is not a directory: {vault_root}")
+
+    vault_name = vault_root.name
+    resolved = str(vault_root.resolve())
+
+    # Check for vault name collision with different absolute path
+    existing = conn.execute(
+        "SELECT value FROM vault_config WHERE key = ?",
+        (f"vault_root:{vault_name}",),
+    ).fetchone()
+    if existing and existing["value"] != resolved:
+        msg = (
+            f"Vault name '{vault_name}' already used by {existing['value']}. Use --db to specify a different database."
+        )
+        raise ValueError(msg)
+
+    # Register vault root
+    conn.execute(
+        "INSERT OR REPLACE INTO vault_config (key, value) VALUES (?, ?)",
+        (f"vault_root:{vault_name}", resolved),
+    )
+
     md_files = _list_md_files(vault_root)
 
     if full:
-        # Wipe existing data via subqueries (no variable limit)
-        conn.execute("DELETE FROM chunks_fts WHERE rowid IN (SELECT id FROM chunks)")
-        conn.execute("DELETE FROM chunks_vec WHERE rowid IN (SELECT id FROM chunks)")
-        conn.execute("DELETE FROM chunks")
-        conn.execute("DELETE FROM files")
+        _remove_vault_files(conn, vault_name)
         conn.commit()
+
+    # Build set of expected disk paths (prefixed)
+    disk_paths = {f"{vault_name}/{f.relative_to(vault_root)}" for f in md_files}
+
+    # Get DB state for this vault (empty after full wipe)
+    db_files = {
+        row["file_path"]: row["file_hash"]
+        for row in conn.execute(
+            "SELECT file_path, file_hash FROM files WHERE file_path LIKE ?",
+            (f"{vault_name}/%",),
+        ).fetchall()
+    }
+
+    # Remove deleted files (in DB but not on disk)
+    for deleted_path in set(db_files.keys()) - disk_paths:
+        _remove_file(conn, deleted_path)
 
     total = len(md_files)
     show_progress = sys.stderr.isatty() and total > 50
 
-    # Process in batches of 100
     for batch_start in range(0, total, 100):
         batch = md_files[batch_start : batch_start + 100]
-        for file_path in batch:
-            index_file(conn, file_path, vault_root, embedder)
+        for fp in batch:
+            rel_path = f"{vault_name}/{fp.relative_to(vault_root)}"
+            if rel_path not in db_files:
+                index_file(conn, fp, vault_root, embedder)
+            elif db_files[rel_path] != compute_sha256(fp):
+                _remove_file(conn, rel_path)
+                index_file(conn, fp, vault_root, embedder)
         conn.commit()
         if show_progress:
             done = min(batch_start + len(batch), total)
@@ -341,39 +409,3 @@ def index_directory(
 
     if show_progress:
         sys.stderr.write("\n")
-
-
-def incremental_index(
-    conn: sqlite3.Connection,
-    vault_root: Path,
-    embedder: Callable[[list[str]], np.ndarray],
-) -> None:
-    """Incremental index: skip unchanged, update modified, add new, remove deleted."""
-    disk_files = _list_md_files(vault_root)
-    disk_paths = {str(f.relative_to(vault_root)) for f in disk_files}
-
-    # Get DB state
-    db_files = {
-        row["file_path"]: row["file_hash"] for row in conn.execute("SELECT file_path, file_hash FROM files").fetchall()
-    }
-    db_paths = set(db_files.keys())
-
-    # Deleted files: in DB but not on disk
-    for deleted_path in db_paths - disk_paths:
-        _remove_file(conn, deleted_path)
-
-    # New or modified files
-    for file_path in disk_files:
-        rel_path = str(file_path.relative_to(vault_root))
-        current_hash = compute_sha256(file_path)
-
-        if rel_path not in db_files:
-            # New file
-            index_file(conn, file_path, vault_root, embedder)
-        elif db_files[rel_path] != current_hash:
-            # Modified file -- remove old, re-index
-            _remove_file(conn, rel_path)
-            index_file(conn, file_path, vault_root, embedder)
-        # else: unchanged, skip
-
-    conn.commit()
