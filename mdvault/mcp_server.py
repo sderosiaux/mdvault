@@ -36,6 +36,8 @@ def search_vault(query: str, top_k: int = 5, expand: bool = False) -> dict:
     """Search the local markdown vault using hybrid BM25 + semantic search.
     Set expand=True to use local LLM (Ollama) for query expansion."""
     db_path = _resolve_db()
+    if not db_path.exists():
+        return {"error": "Database not found. Run 'mdvault index' first.", "results": [], "query": query, "total_chunks": 0}
     embedder = _get_embedder()
     conn = get_connection(db_path)
     total = get_total_chunks(conn)
@@ -61,6 +63,8 @@ def search_vault(query: str, top_k: int = 5, expand: bool = False) -> dict:
 def related_notes(file_path: str, top_k: int = 5) -> dict:
     """Find related notes: direct links, backlinks, and semantically similar files."""
     db_path = _resolve_db()
+    if not db_path.exists():
+        return {"error": "Database not found. Run 'mdvault index' first.", "file_path": file_path, "links": [], "backlinks": [], "similar": []}
     embedder = _get_embedder()
     conn = get_connection(db_path)
     result = _related_notes(conn, file_path, embedder, top_k=top_k)

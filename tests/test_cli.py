@@ -1,8 +1,5 @@
-import os
-import pytest
 from typer.testing import CliRunner
 from mdvault.cli import app
-from pathlib import Path
 from tests.conftest import FIXTURES_DIR
 
 runner = CliRunner()
@@ -90,14 +87,14 @@ def test_related_command(tmp_path):
     assert "b.md" in result.output
 
 
-def test_search_vault_tool_returns_correct_schema(tmp_path):
+def test_search_vault_tool_returns_correct_schema(tmp_path, monkeypatch):
     """MCP search_vault tool returns correct schema."""
     db_file = tmp_path / "vault.db"
     # Index first via CLI
     runner.invoke(app, ["index", str(FIXTURES_DIR), "--db", str(db_file)])
 
     # Call the MCP tool directly
-    os.environ["VAULT_DB"] = str(db_file)
+    monkeypatch.setenv("VAULT_DB", str(db_file))
     from mdvault.mcp_server import search_vault
 
     result = search_vault("nginx reverse proxy", top_k=3)
