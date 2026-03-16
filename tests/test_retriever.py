@@ -8,6 +8,7 @@ from mdvault.retriever import (
     rrf_fusion,
     hybrid_search,
     get_total_chunks,
+    related_notes,
 )
 from tests.conftest import FIXTURES_DIR
 
@@ -165,3 +166,81 @@ def test_total_chunks_count(indexed_db):
     conn.close()
     assert total == chunk_count
     assert total > 0
+
+
+# ---------- related_notes ----------
+
+def test_related_notes_returns_structure(tmp_path, mock_embedder):
+    """related_notes returns dict with links, backlinks, similar."""
+    vault = tmp_path / "vault"
+    vault.mkdir()
+    (vault / "a.md").write_text(
+        "# A\n\n## Content\n\nSee [B](b.md) for details with enough words to chunk properly.\n"
+    )
+    (vault / "b.md").write_text(
+        "# B\n\n## Content\n\nNote B references [[a]] with enough words to chunk properly.\n"
+    )
+    (vault / "c.md").write_text(
+        "# C\n\n## Content\n\nUnrelated note C with enough words to chunk properly for indexing.\n"
+    )
+
+    db_p = tmp_path / "test.db"
+    init_db(db_p, vault_root=str(vault))
+    conn = get_connection(db_p)
+    index_directory(conn, vault, mock_embedder, full=True)
+    conn.commit()
+
+    result = related_notes(conn, "a.md", mock_embedder)
+    conn.close()
+
+    assert result["file_path"] == "a.md"
+    assert "b.md" in result["links"]          # a links to b
+    assert "b.md" in result["backlinks"]       # b wikilinks to a
+    assert isinstance(result["similar"], list)
+
+
+def test_related_notes_backlinks_by_filename(tmp_path, mock_embedder):
+    """Backlinks match by filename for wikilinks stored without path."""
+    vault = tmp_path / "vault"
+    sub = vault / "sub"
+    sub.mkdir(parents=True)
+    (sub / "deep.md").write_text(
+        "# Deep\n\n## Content\n\nEnough words to chunk. See [[top]] for parent reference.\n"
+    )
+    (vault / "top.md").write_text(
+        "# Top\n\n## Content\n\nTop level note with enough words to form a valid chunk.\n"
+    )
+
+    db_p = tmp_path / "test.db"
+    init_db(db_p, vault_root=str(vault))
+    conn = get_connection(db_p)
+    index_directory(conn, vault, mock_embedder, full=True)
+    conn.commit()
+
+    result = related_notes(conn, "top.md", mock_embedder)
+    conn.close()
+
+    # [[top]] stored as "top.md", backlink query matches by filename
+    assert "sub/deep.md" in result["backlinks"]
+
+
+def test_related_notes_similar_excludes_self(tmp_path, mock_embedder):
+    """Similar files list never includes the queried file itself."""
+    vault = tmp_path / "vault"
+    vault.mkdir()
+    for name in ["x.md", "y.md", "z.md"]:
+        (vault / name).write_text(
+            f"# {name}\n\n## Content\n\nThis is {name} with enough words for a valid chunk to index.\n"
+        )
+
+    db_p = tmp_path / "test.db"
+    init_db(db_p, vault_root=str(vault))
+    conn = get_connection(db_p)
+    index_directory(conn, vault, mock_embedder, full=True)
+    conn.commit()
+
+    result = related_notes(conn, "x.md", mock_embedder)
+    conn.close()
+
+    assert "x.md" not in result["similar"]
+    assert len(result["similar"]) <= 5

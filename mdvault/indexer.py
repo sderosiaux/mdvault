@@ -1,4 +1,5 @@
 import hashlib
+import posixpath
 import re
 import sqlite3
 from dataclasses import dataclass
@@ -155,6 +156,41 @@ def compute_sha256(file_path: Path) -> str:
     return hashlib.sha256(content).hexdigest()
 
 
+def _extract_links(content: str, source_rel_path: str) -> list[str]:
+    """Extract link targets from markdown content. Returns target paths."""
+    targets: set[str] = set()
+    source_dir = posixpath.dirname(source_rel_path)
+
+    # Strip fenced code blocks and inline code before parsing
+    cleaned = re.sub(r"```[\s\S]*?```", "", content)
+    cleaned = re.sub(r"`[^`]+`", "", cleaned)
+
+    # Standard Markdown links (not images): [text](path.md) or [text](path.md#anchor)
+    for m in re.finditer(r"(?<!!)\[([^\]]*)\]\(([^)]+)\)", cleaned):
+        href = m.group(2).split("#")[0].split()[0]
+        if not href or "://" in href or href.startswith("mailto:"):
+            continue
+        if not href.endswith(".md"):
+            continue
+        resolved = posixpath.normpath(posixpath.join(source_dir, href))
+        targets.add(resolved)
+
+    # Wikilinks: [[target]] or [[target|display text]]
+    for m in re.finditer(r"\[\[([^\]|]+)(?:\|[^\]]*)?\]\]", cleaned):
+        name = m.group(1).strip().split("#")[0]
+        if not name:
+            continue
+        if not name.endswith(".md"):
+            name += ".md"
+        targets.add(name)
+
+    # Remove self-links
+    targets.discard(source_rel_path)
+    targets.discard(posixpath.basename(source_rel_path))
+
+    return sorted(targets)
+
+
 def index_file(
     conn: sqlite3.Connection,
     file_path: Path,
@@ -207,6 +243,14 @@ def index_file(
         conn.execute(
             "INSERT INTO chunks_vec(rowid, embedding) VALUES (?, ?)",
             (chunk_id, serialize_f32(embedding)),
+        )
+
+    # Extract and store links
+    link_targets = _extract_links(content, rel_path)
+    for target_path in link_targets:
+        conn.execute(
+            "INSERT INTO links (source_file_id, target_path) VALUES (?, ?)",
+            (file_id, target_path),
         )
 
 

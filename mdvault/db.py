@@ -45,6 +45,15 @@ def init_db(db_path: str | Path, vault_root: str) -> None:
         );
 
         CREATE INDEX IF NOT EXISTS idx_chunks_file_id ON chunks(file_id);
+
+        CREATE TABLE IF NOT EXISTS links (
+            id             INTEGER PRIMARY KEY,
+            source_file_id INTEGER NOT NULL REFERENCES files(id) ON DELETE CASCADE,
+            target_path    TEXT NOT NULL
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_links_source ON links(source_file_id);
+        CREATE INDEX IF NOT EXISTS idx_links_target ON links(target_path);
     """)
 
     # FTS5 virtual table (external content)

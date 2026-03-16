@@ -1,3 +1,4 @@
+import posixpath
 import sqlite3
 from typing import Callable
 
@@ -142,3 +143,73 @@ def hybrid_search(
 def get_total_chunks(conn: sqlite3.Connection) -> int:
     """Return total number of indexed chunks."""
     return conn.execute("SELECT COUNT(*) as c FROM chunks").fetchone()["c"]
+
+
+def related_notes(
+    conn: sqlite3.Connection,
+    file_path: str,
+    embedder: Callable[[list[str]], np.ndarray],
+    top_k: int = 5,
+) -> dict:
+    """Find related notes: direct links, backlinks, and semantically similar files."""
+    filename = posixpath.basename(file_path)
+
+    # Direct links (outgoing)
+    links = [
+        row["target_path"]
+        for row in conn.execute(
+            """
+            SELECT DISTINCT l.target_path
+            FROM links l
+            JOIN files f ON f.id = l.source_file_id
+            WHERE f.file_path = ?
+            """,
+            (file_path,),
+        ).fetchall()
+    ]
+
+    # Backlinks (incoming) — match by full path OR filename (for wikilinks)
+    backlinks = [
+        row["file_path"]
+        for row in conn.execute(
+            """
+            SELECT DISTINCT f.file_path
+            FROM links l
+            JOIN files f ON f.id = l.source_file_id
+            WHERE l.target_path = ? OR l.target_path = ?
+            """,
+            (file_path, filename),
+        ).fetchall()
+    ]
+
+    # Semantically similar files via vector search on first chunk
+    chunk = conn.execute(
+        """
+        SELECT c.content FROM chunks c
+        JOIN files f ON f.id = c.file_id
+        WHERE f.file_path = ?
+        ORDER BY c.chunk_idx
+        LIMIT 1
+        """,
+        (file_path,),
+    ).fetchone()
+
+    similar: list[str] = []
+    if chunk:
+        query_vec = embedder([chunk["content"]])[0]
+        vec_results = vector_search(conn, query_vec, top_k=50)
+        seen: set[str] = set()
+        for r in vec_results:
+            fp = r["file_path"]
+            if fp != file_path and fp not in seen:
+                seen.add(fp)
+                similar.append(fp)
+                if len(similar) >= top_k:
+                    break
+
+    return {
+        "file_path": file_path,
+        "links": links,
+        "backlinks": backlinks,
+        "similar": similar,
+    }

@@ -70,6 +70,26 @@ def test_search_top_k_flag(tmp_path):
     assert result_count >= 3
 
 
+def test_related_command(tmp_path):
+    """mdvault related shows links, backlinks, similar."""
+    db_file = tmp_path / "vault.db"
+    vault = tmp_path / "vault"
+    vault.mkdir()
+    (vault / "a.md").write_text(
+        "# A\n\n## Content\n\nSee [B](b.md) for reference with enough words to chunk.\n"
+    )
+    (vault / "b.md").write_text(
+        "# B\n\n## Content\n\nNote B with enough words to form a valid chunk for indexing.\n"
+    )
+    runner.invoke(app, ["index", str(vault), "--db", str(db_file)])
+    result = runner.invoke(app, ["related", "a.md", "--db", str(db_file)])
+    assert result.exit_code == 0, result.output
+    assert "Links" in result.output
+    assert "Backlinks" in result.output
+    assert "Similar" in result.output
+    assert "b.md" in result.output
+
+
 def test_search_vault_tool_returns_correct_schema(tmp_path):
     """MCP search_vault tool returns correct schema."""
     db_file = tmp_path / "vault.db"

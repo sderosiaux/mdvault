@@ -6,7 +6,7 @@ from mcp.server.fastmcp import FastMCP
 import platformdirs
 
 from mdvault.db import get_connection
-from mdvault.retriever import hybrid_search, get_total_chunks
+from mdvault.retriever import hybrid_search, get_total_chunks, related_notes as _related_notes
 
 mcp_app = FastMCP("mdvault")
 
@@ -52,6 +52,17 @@ def search_vault(query: str, top_k: int = 5) -> dict:
         "query": query,
         "total_chunks": total,
     }
+
+
+@mcp_app.tool()
+def related_notes(file_path: str, top_k: int = 5) -> dict:
+    """Find related notes: direct links, backlinks, and semantically similar files."""
+    db_path = _resolve_db()
+    embedder = _get_embedder()
+    conn = get_connection(db_path)
+    result = _related_notes(conn, file_path, embedder, top_k=top_k)
+    conn.close()
+    return result
 
 
 def run():

@@ -12,7 +12,7 @@ def test_init_db_creates_all_tables(db_path):
     )
     names = {row["name"] for row in cursor.fetchall()}
     conn.close()
-    for table in ("vault_config", "files", "chunks"):
+    for table in ("vault_config", "files", "chunks", "links"):
         assert table in names, f"Missing table: {table}"
     # FTS5 creates shadow tables; verify the virtual table works
     conn = get_connection(db_path)

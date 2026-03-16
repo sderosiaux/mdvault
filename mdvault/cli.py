@@ -7,7 +7,7 @@ import platformdirs
 
 from mdvault.db import get_connection, init_db
 from mdvault.indexer import index_directory, incremental_index
-from mdvault.retriever import hybrid_search, get_total_chunks
+from mdvault.retriever import hybrid_search, get_total_chunks, related_notes as _related_notes
 
 app = typer.Typer(add_completion=False)
 
@@ -127,6 +127,52 @@ def stats(
     typer.echo(f"Files indexed : {file_count:,}")
     typer.echo(f"Total chunks  : {chunk_count:,}")
     typer.echo(f"DB size       : {size_str}")
+
+
+@app.command()
+def related(
+    file_path: str = typer.Argument(..., help="Relative path of the file in the vault"),
+    db: Optional[str] = typer.Option(None, "--db", help="Path to database file"),
+    top_k: int = typer.Option(5, "--top-k", help="Number of similar files to return"),
+):
+    """Show related notes: links, backlinks, and semantically similar files."""
+    db_path = _resolve_db(db)
+    if not db_path.exists():
+        typer.echo("Error: Database not found. Run 'mdvault index' first.")
+        raise typer.Exit(1)
+
+    embedder = _get_embedder()
+    conn = get_connection(db_path)
+    result = _related_notes(conn, file_path, embedder, top_k=top_k)
+    conn.close()
+
+    typer.echo(f"Related notes for: {result['file_path']}")
+    typer.echo("")
+
+    if result["links"]:
+        typer.echo("Links →")
+        for link in result["links"]:
+            typer.echo(f"  {link}")
+    else:
+        typer.echo("Links → (none)")
+
+    typer.echo("")
+
+    if result["backlinks"]:
+        typer.echo("Backlinks ←")
+        for bl in result["backlinks"]:
+            typer.echo(f"  {bl}")
+    else:
+        typer.echo("Backlinks ← (none)")
+
+    typer.echo("")
+
+    if result["similar"]:
+        typer.echo("Similar (vector)")
+        for s in result["similar"]:
+            typer.echo(f"  {s}")
+    else:
+        typer.echo("Similar → (none)")
 
 
 @app.command()

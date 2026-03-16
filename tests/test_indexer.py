@@ -10,6 +10,7 @@ from mdvault.indexer import (
     index_file,
     index_directory,
     incremental_index,
+    _extract_links,
 )
 from tests.conftest import FIXTURES_DIR
 
@@ -307,3 +308,152 @@ def test_batch_processing_large_vault(tmp_path, mock_embedder):
     file_count = conn.execute("SELECT COUNT(*) as c FROM files").fetchone()["c"]
     conn.close()
     assert file_count == 150
+
+
+# ---------- _extract_links tests ----------
+
+def test_extract_links_standard_markdown():
+    """Parses [text](path.md) links, resolves relative to source."""
+    content = "See [config](../infra/nginx.md) and [guide](./setup.md) for details."
+    links = _extract_links(content, "docs/howto.md")
+    assert "infra/nginx.md" in links
+    assert "docs/setup.md" in links
+
+
+def test_extract_links_wikilinks():
+    """Parses [[wikilink]] and [[wikilink|display]]."""
+    content = "Check [[kubernetes]] and [[docker|Docker Guide]] for more."
+    links = _extract_links(content, "notes/index.md")
+    assert "kubernetes.md" in links
+    assert "docker.md" in links
+
+
+def test_extract_links_ignores_external_urls():
+    """Skips http/https/mailto links."""
+    content = "See [docs](https://example.com/foo.md) and [mail](mailto:x@y.md)."
+    links = _extract_links(content, "notes/index.md")
+    assert links == []
+
+
+def test_extract_links_ignores_non_md():
+    """Skips links to non-.md files."""
+    content = "See [image](photo.png) and [pdf](doc.pdf)."
+    links = _extract_links(content, "notes/index.md")
+    assert links == []
+
+
+def test_extract_links_removes_self_links():
+    """Does not include self-referencing links."""
+    content = "See [myself](index.md) and [[index]]."
+    links = _extract_links(content, "index.md")
+    assert links == []
+
+
+def test_extract_links_strips_anchors():
+    """Strips #anchor fragments from links."""
+    content = "See [section](other.md#setup) for details."
+    links = _extract_links(content, "notes/index.md")
+    assert "notes/other.md" in links
+
+
+def test_extract_links_wikilink_with_heading():
+    """[[note#heading]] strips the anchor and resolves to note.md."""
+    content = "See [[kubernetes#pods]] for details."
+    links = _extract_links(content, "notes/index.md")
+    assert "kubernetes.md" in links
+    assert "kubernetes#pods.md" not in links
+
+
+def test_extract_links_ignores_image_links():
+    """![alt](file.md) image syntax is not parsed as a document link."""
+    content = "![diagram](overview.md) and [real link](other.md)."
+    links = _extract_links(content, "notes/index.md")
+    assert "notes/other.md" in links
+    assert "notes/overview.md" not in links
+
+
+def test_extract_links_ignores_code_blocks():
+    """Links inside fenced code blocks and inline code are skipped."""
+    content = (
+        "Real [link](real.md) here.\n\n"
+        "```markdown\n[fake](fake.md)\n```\n\n"
+        "And `[inline](inline.md)` code."
+    )
+    links = _extract_links(content, "index.md")
+    assert "real.md" in links
+    assert "fake.md" not in links
+    assert "inline.md" not in links
+
+
+def test_extract_links_with_title_attribute():
+    """[text](path.md 'title') correctly extracts path.md."""
+    content = 'See [guide](setup.md "Setup Guide") for details.'
+    links = _extract_links(content, "index.md")
+    assert "setup.md" in links
+
+
+def test_extract_links_ignores_ftp_file_protocols():
+    """ftp:// and file:// links are filtered out."""
+    content = "See [ftp](ftp://server/notes.md) and [local](file:///tmp/notes.md)."
+    links = _extract_links(content, "index.md")
+    assert links == []
+
+
+# ---------- links table integration ----------
+
+def test_index_file_stores_links(tmp_path, mock_embedder):
+    """Links extracted from markdown are stored in the links table."""
+    vault = tmp_path / "vault"
+    vault.mkdir()
+    (vault / "a.md").write_text(
+        "# Note A\n\n## Content\n\nSee [B](b.md) and [[c]] for reference with enough words here.\n"
+    )
+    (vault / "b.md").write_text(
+        "# Note B\n\n## Content\n\nThis is note B with enough words to form a valid chunk.\n"
+    )
+    (vault / "c.md").write_text(
+        "# Note C\n\n## Content\n\nThis is note C with enough words to form a valid chunk.\n"
+    )
+
+    db_p = tmp_path / "test.db"
+    init_db(db_p, vault_root=str(vault))
+    conn = get_connection(db_p)
+    index_directory(conn, vault, mock_embedder, full=True)
+    conn.commit()
+
+    links = [
+        row["target_path"]
+        for row in conn.execute(
+            "SELECT target_path FROM links l JOIN files f ON f.id = l.source_file_id WHERE f.file_path = 'a.md'"
+        ).fetchall()
+    ]
+    conn.close()
+    assert "b.md" in links
+    assert "c.md" in links
+
+
+def test_links_removed_on_file_delete(tmp_path, mock_embedder):
+    """When a file is deleted (incremental), its links are cascade-deleted."""
+    vault = tmp_path / "vault"
+    vault.mkdir()
+    (vault / "a.md").write_text(
+        "# Note A\n\n## Links\n\nSee [B](b.md) for reference with enough words to chunk.\n"
+    )
+    (vault / "b.md").write_text(
+        "# Note B\n\n## Content\n\nEnough words to form a valid chunk for indexing purposes.\n"
+    )
+
+    db_p = tmp_path / "test.db"
+    init_db(db_p, vault_root=str(vault))
+    conn = get_connection(db_p)
+    index_directory(conn, vault, mock_embedder, full=True)
+    conn.commit()
+    assert conn.execute("SELECT COUNT(*) as c FROM links").fetchone()["c"] > 0
+
+    (vault / "a.md").unlink()
+    incremental_index(conn, vault, mock_embedder)
+    conn.commit()
+
+    # Links from a.md should be gone (CASCADE)
+    assert conn.execute("SELECT COUNT(*) as c FROM links").fetchone()["c"] == 0
+    conn.close()
