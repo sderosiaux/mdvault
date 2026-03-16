@@ -5,7 +5,7 @@ from pathlib import Path
 import platformdirs
 from mcp.server.fastmcp import FastMCP
 
-from mdvault.db import get_connection
+from mdvault.db import get_connection, init_db
 from mdvault.memory import delete_memory as _delete_memory
 from mdvault.memory import store_memory as _store_memory
 from mdvault.memory import update_memory as _update_memory
@@ -147,4 +147,7 @@ def delete_memory(id: str | None = None, namespace: str | None = None) -> dict:
 
 
 def run():
+    db_path = _resolve_db()
+    if db_path.exists():
+        init_db(db_path)  # apply migrations for older DBs
     mcp_app.run()
