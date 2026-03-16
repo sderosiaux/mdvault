@@ -146,3 +146,51 @@ def test_mcp_search_vault_has_source_param():
     search_tool = tools["search_vault"]
     schema = search_tool.inputSchema
     assert "source" in schema.get("properties", {})
+
+
+# ── CLI remember / forget / memories tests ────────────────────────────
+
+
+def test_remember_command(tmp_path):
+    """mdvault remember stores a memory."""
+    db_path = tmp_path / "test.db"
+    result = runner.invoke(app, ["remember", "Python is great for scripting", "--db", str(db_path)])
+    assert result.exit_code == 0, result.output
+    assert "Stored" in result.output
+
+
+def test_forget_by_id(tmp_path):
+    """mdvault forget --id removes a memory."""
+    db_path = tmp_path / "test.db"
+    result = runner.invoke(app, ["remember", "To forget soon", "--db", str(db_path)])
+    assert result.exit_code == 0, result.output
+    # Extract 8-char hex id from output like "Stored a1b2c3d4 (1 chunks)"
+    import re
+
+    match = re.search(r"Stored ([0-9a-f]{8})", result.output)
+    assert match is not None, f"Could not find id in: {result.output}"
+    mem_id = match.group(1)
+
+    result = runner.invoke(app, ["forget", "--id", mem_id, "--db", str(db_path)])
+    assert result.exit_code == 0, result.output
+    assert "Deleted" in result.output
+
+
+def test_memories_list(tmp_path):
+    """mdvault memories lists stored memories."""
+    db_path = tmp_path / "test.db"
+    runner.invoke(app, ["remember", "Fact one content", "--db", str(db_path), "--namespace", "test"])
+    runner.invoke(app, ["remember", "Fact two content", "--db", str(db_path), "--namespace", "test"])
+
+    result = runner.invoke(app, ["memories", "--db", str(db_path)])
+    assert result.exit_code == 0, result.output
+    assert "2" in result.output
+
+
+def test_search_with_source_flag(tmp_path):
+    """mdvault search --source memories works."""
+    db_path = tmp_path / "test.db"
+    runner.invoke(app, ["remember", "Databases are fundamental to computing", "--db", str(db_path)])
+
+    result = runner.invoke(app, ["search", "databases", "--db", str(db_path), "--source", "memories"])
+    assert result.exit_code == 0, result.output
