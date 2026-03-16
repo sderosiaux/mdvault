@@ -272,7 +272,7 @@ def test_search_vault_filter(tmp_path):
     # All results should be from the vault
     result2 = runner.invoke(app, ["search", "nginx", "--db", str(db_file), "--vault", "nonexistent"])
     # No results from nonexistent vault
-    assert "Chunks searched" in result2.output or result2.output.strip() == ""
+    assert "No results" in result2.output
 
 
 def test_list_command(tmp_path):

@@ -185,19 +185,25 @@ def search(
             )
         )
     else:
-        typer.echo(f"Query: {query}")
-        typer.echo(f"Chunks searched: {total}")
-        typer.echo("")
-
         if not results:
             typer.echo("No results.")
+            return
+
         for i, r in enumerate(results, start=1):
-            typer.echo(f"[{i}] {r['file_path']} (chunk {r['chunk_idx']}) — score {r['score']:.3f}")
-            typer.echo("─" * 42)
-            content = r["raw_content"] if no_truncate else r["raw_content"][:500]
-            typer.echo(content)
-            typer.echo("─" * 42)
-            typer.echo("")
+            if no_truncate:
+                typer.echo(f"[{i}] {r['score']:.3f}  {r['file_path']}:{r['chunk_idx']}")
+                typer.echo(r["raw_content"])
+                typer.echo("")
+            else:
+                preview = ""
+                for line in r["raw_content"].splitlines():
+                    stripped = line.strip().lstrip("#").strip()
+                    if stripped:
+                        preview = stripped[:120]
+                        break
+                typer.echo(f"[{i}] {r['score']:.3f}  {r['file_path']}:{r['chunk_idx']}")
+                typer.echo(f"  {preview}")
+                typer.echo("")
 
 
 @app.command()
