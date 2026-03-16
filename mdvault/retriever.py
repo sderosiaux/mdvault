@@ -16,9 +16,11 @@ def bm25_search(
     top_k: int = 50,
 ) -> list[dict]:
     """FTS5 BM25 search. Returns ranked results (best first)."""
-    # Convert multi-word query to FTS5 OR semantics so partial matches score
+    # Build FTS5 query: bigrams (boosted via NEAR) + unigrams for partial matches
     tokens = [token.replace('"', '""') for token in query.split() if token]
-    fts_query = " OR ".join(f'"{t}"' for t in tokens) or query
+    parts = [f'NEAR("{tokens[i]}" "{tokens[i + 1]}", 3)' for i in range(len(tokens) - 1)]
+    parts.extend(f'"{t}"' for t in tokens)
+    fts_query = " OR ".join(parts) if parts else query
 
     try:
         rows = conn.execute(
@@ -101,20 +103,22 @@ def rrf_fusion(
     bm25_results: list[dict],
     vec_results: list[dict],
     top_k: int = 5,
-    k: int = 60,
+    k: int = 20,
+    bm25_weight: float = 1.5,
+    vec_weight: float = 1.0,
 ) -> list[dict]:
-    """Reciprocal Rank Fusion. Ranks are 1-indexed. score = 1/(k+rank_bm25) + 1/(k+rank_vec)."""
+    """Weighted Reciprocal Rank Fusion. score = w_bm25/(k+rank_bm25) + w_vec/(k+rank_vec)."""
     scores: dict[int, float] = {}
     metadata: dict[int, dict] = {}
 
     for rank, r in enumerate(bm25_results, start=1):
         cid = r["chunk_id"]
-        scores[cid] = scores.get(cid, 0.0) + 1.0 / (k + rank)
+        scores[cid] = scores.get(cid, 0.0) + bm25_weight / (k + rank)
         metadata[cid] = r
 
     for rank, r in enumerate(vec_results, start=1):
         cid = r["chunk_id"]
-        scores[cid] = scores.get(cid, 0.0) + 1.0 / (k + rank)
+        scores[cid] = scores.get(cid, 0.0) + vec_weight / (k + rank)
         if cid not in metadata:
             metadata[cid] = r
 
@@ -215,7 +219,24 @@ def hybrid_search(
     vec_results = vector_search(conn, query_vec, top_k=50)
     # Fuse with extra headroom, then dedup by content hash to avoid duplicated files
     fused = rrf_fusion(bm25_results, vec_results, top_k=top_k * 3)
-    return _dedup_results(fused, conn, top_k)
+    deduped = _dedup_results(fused, conn, top_k * 2)
+
+    # Re-rank: boost by filename match ratio (focused files rank higher)
+    query_terms = {t.lower() for t in query.split() if len(t) > 2}
+    for r in deduped:
+        # Use filename only (most specific signal)
+        filename = r["file_path"].rsplit("/", 1)[-1].rsplit(".", 1)[0]
+        fn_tokens = set(filename.lower().replace("-", " ").replace("_", " ").split())
+        fn_tokens = {t for t in fn_tokens if len(t) > 2}
+        if not fn_tokens:
+            continue
+        matches = len(query_terms & fn_tokens)
+        if matches:
+            ratio = matches / len(fn_tokens)
+            r["score"] = r.get("score", 0.0) + ratio * 0.15
+
+    deduped.sort(key=lambda r: r.get("score", 0.0), reverse=True)
+    return deduped[:top_k]
 
 
 def get_total_chunks(conn: sqlite3.Connection) -> int:

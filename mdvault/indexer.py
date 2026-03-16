@@ -88,16 +88,7 @@ def chunk_file(content: str) -> list[Chunk]:
         merged[-2] = (prev_text + "\n\n" + last_text, prev_heading)
         merged.pop()
 
-    # Apply overlap between chunks
-    if len(merged) > 1:
-        overlapped = [merged[0]]
-        for i in range(1, len(merged)):
-            prev_words = merged[i - 1][0].split()
-            overlap_words = prev_words[-50:] if len(prev_words) >= 50 else prev_words
-            overlap_text = " ".join(overlap_words)
-            current_text, current_heading = merged[i]
-            overlapped.append((overlap_text + " " + current_text, current_heading))
-        merged = overlapped
+    # No overlap — each chunk is independent for cleaner scoring
 
     return [Chunk(content=text, heading=heading) for text, heading in merged]
 
