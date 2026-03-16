@@ -12,6 +12,7 @@ Zero infrastructure. Everything lives in a single `.db` file.
 - **Contextual chunking** — each chunk is prefixed with `[path > title > heading]` for better retrieval ([Anthropic approach](https://www.anthropic.com/news/contextual-retrieval))
 - **Link graph** — parses Markdown links and `[[wikilinks]]`, surfaces backlinks and semantically similar files
 - **Query expansion** — optional local LLM (Ollama) expands queries for richer vector search
+- **Memory intelligence** — temporal decay, confidence scoring, and automatic promotion of recurring queries into long-term memory
 - **Fast embeddings** — [potion-base-8M](https://huggingface.co/minishlab/potion-base-8M) via model2vec, CPU-only, ~30MB
 - **Incremental indexing** — SHA256-based change detection, only reprocesses modified files
 - **MCP server** — Claude Code can search your vault and explore related notes
@@ -52,8 +53,20 @@ mdvault search "ssh tunnel" --expand --expand-model qwen3:0.6b  # default model
 # (file path is relative to the vault root)
 mdvault related path/to/note.md
 
-# Stats
+# Stats (includes memory & query analytics)
 mdvault stats
+
+# Store a memory (searchable alongside your files)
+mdvault remember "Kafka timeout is controlled by max.poll.interval.ms"
+
+# List stored memories (with confidence, hits, decay)
+mdvault memories
+
+# Show knowledge gaps (recurring queries with poor results)
+mdvault gaps
+
+# Delete a memory
+mdvault forget <memory-id>
 
 # Custom DB location
 mdvault index ~/notes/ --db ~/vault.db
@@ -86,6 +99,8 @@ If `VAULT_DB` is omitted, defaults to `~/.local/share/mdvault/vault.db` (Linux) 
 |---|---|
 | `search_vault` | Hybrid BM25 + semantic search with optional query expansion |
 | `related_notes` | Links, backlinks, and semantically similar files for a given note |
+| `store_memory` | Store a memory (auto-chunked, searchable alongside files) |
+| `delete_memory` | Delete memories by id or namespace |
 
 Once connected, ask Claude Code:
 - *"search my notes for how I configured SSH tunnels"*
@@ -110,6 +125,29 @@ Query
 **Chunking** splits files on `##`/`###` headings (max 400 words, 50-word overlap, small sections merged). Each chunk is prefixed with its document context (`[path > title > heading]`) before embedding and FTS indexing — this improves retrieval by grounding chunks in their source document.
 
 **Query expansion** (opt-in via `--expand`) calls a local [Ollama](https://ollama.ai) model (default: `qwen3:0.6b`) to generate a short paragraph that a relevant document might contain, then concatenates it with the original query for vector search. BM25 always uses the original query for precise lexical matching. Install Ollama and pull the model with `ollama pull qwen3:0.6b`.
+
+## Memory Intelligence
+
+Memories are searchable alongside your files but ranked by three implicit, metadata-driven signals — no configuration needed.
+
+**Temporal decay** — memories lose relevance over time. Linear decay over 180 days (floor 0.1), reset on each hit. A note you search for regularly stays fresh; one you never touch fades.
+
+**Confidence scoring** — base confidence depends on source (`user`=0.7, `agent`=0.5, `promoted`=0.3) plus a logarithmic hit boost (capped at +0.3). Memories that prove useful gain weight.
+
+**Automatic promotion** — every search is logged. Queries are clustered by embedding similarity (cosine > 0.85). When a cluster reaches 5+ occurrences:
+- If results were good (avg score ≥ 0.3), the best result is crystallized as a permanent memory
+- If results were poor (avg score < 0.15), a knowledge gap is recorded
+
+```
+Search query
+  ├── query_log + query_vec (logged)
+  ├── hit tracking on memory results
+  └── every 20 queries:
+        ├── cluster_recent_queries (embedding similarity)
+        └── maybe_promote (crystallize or flag gap)
+```
+
+Use `mdvault gaps` to surface recurring queries that your vault can't answer well.
 
 ## Tech Stack
 
