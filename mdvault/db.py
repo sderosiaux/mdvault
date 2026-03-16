@@ -60,11 +60,35 @@ def init_db(db_path: str | Path) -> None:
             namespace  TEXT NOT NULL DEFAULT '',
             source     TEXT NOT NULL DEFAULT 'api',
             metadata   TEXT NOT NULL DEFAULT '{}',
+            confidence REAL NOT NULL DEFAULT 0.5,
+            hit_count  INTEGER NOT NULL DEFAULT 0,
+            last_hit_at DATETIME,
             created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
             updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
         );
 
         CREATE INDEX IF NOT EXISTS idx_memory_ns ON memory_meta(namespace);
+
+        CREATE TABLE IF NOT EXISTS query_log (
+            id           INTEGER PRIMARY KEY,
+            query        TEXT NOT NULL,
+            top_score    REAL,
+            result_count INTEGER,
+            source       TEXT DEFAULT 'search',
+            created_at   DATETIME DEFAULT CURRENT_TIMESTAMP
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_query_log_created ON query_log(created_at);
+
+        CREATE TABLE IF NOT EXISTS query_clusters (
+            id          INTEGER PRIMARY KEY,
+            canonical   TEXT NOT NULL,
+            query_count INTEGER DEFAULT 1,
+            avg_score   REAL,
+            promoted    BOOLEAN DEFAULT FALSE,
+            created_at  DATETIME DEFAULT CURRENT_TIMESTAMP,
+            updated_at  DATETIME DEFAULT CURRENT_TIMESTAMP
+        );
     """)
 
     # FTS5 virtual table (external content)
@@ -83,12 +107,26 @@ def init_db(db_path: str | Path) -> None:
         )
     """)
 
+    conn.execute("""
+        CREATE VIRTUAL TABLE IF NOT EXISTS query_vec USING vec0(
+            embedding FLOAT[256]
+        )
+    """)
+
     conn.commit()
 
     # Migrate older DBs that lack raw_content column
     cols = {row[1] for row in conn.execute("PRAGMA table_info(chunks)").fetchall()}
     if "raw_content" not in cols:
         conn.execute("ALTER TABLE chunks ADD COLUMN raw_content TEXT NOT NULL DEFAULT ''")
+        conn.commit()
+
+    # Migrate older DBs that lack memory_meta intelligence columns
+    meta_cols = {row[1] for row in conn.execute("PRAGMA table_info(memory_meta)").fetchall()}
+    if "confidence" not in meta_cols:
+        conn.execute("ALTER TABLE memory_meta ADD COLUMN confidence REAL NOT NULL DEFAULT 0.5")
+        conn.execute("ALTER TABLE memory_meta ADD COLUMN hit_count INTEGER NOT NULL DEFAULT 0")
+        conn.execute("ALTER TABLE memory_meta ADD COLUMN last_hit_at DATETIME")
         conn.commit()
 
     # Re-enable foreign keys (executescript resets pragmas)

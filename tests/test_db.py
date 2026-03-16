@@ -125,3 +125,34 @@ def test_memory_meta_namespace_index(db_path):
     names = {row["name"] for row in indexes}
     conn.close()
     assert "idx_memory_ns" in names
+
+
+def test_memory_meta_has_intelligence_columns(db_path):
+    """memory_meta has confidence, hit_count, last_hit_at columns."""
+    conn = get_connection(db_path)
+    cols = {row[1] for row in conn.execute("PRAGMA table_info(memory_meta)").fetchall()}
+    conn.close()
+    assert "confidence" in cols
+    assert "hit_count" in cols
+    assert "last_hit_at" in cols
+
+
+def test_query_log_table_exists(db_path):
+    """query_log table exists after init_db."""
+    conn = get_connection(db_path)
+    conn.execute("SELECT * FROM query_log LIMIT 1")
+    conn.close()
+
+
+def test_query_vec_table_exists(db_path):
+    """query_vec virtual table exists after init_db."""
+    conn = get_connection(db_path)
+    conn.execute("SELECT * FROM query_vec LIMIT 1")
+    conn.close()
+
+
+def test_query_clusters_table_exists(db_path):
+    """query_clusters table exists after init_db."""
+    conn = get_connection(db_path)
+    conn.execute("SELECT * FROM query_clusters LIMIT 1")
+    conn.close()
