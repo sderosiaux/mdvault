@@ -1,4 +1,5 @@
 import hashlib
+import json
 import posixpath
 import re
 import sqlite3
@@ -145,32 +146,90 @@ def compute_sha256(file_path: Path) -> str:
     return hashlib.sha256(content).hexdigest()
 
 
-def _list_md_files(vault_root: Path, no_gitignore: bool = False) -> list[Path]:
-    """List .md files under vault_root, respecting .gitignore if in a git repo."""
+_INDEXABLE_EXTENSIONS = {".md", ".jsonl"}
+
+
+def _list_files(vault_root: Path, no_gitignore: bool = False) -> list[Path]:
+    """List indexable files (.md, .jsonl) under vault_root, respecting .gitignore if in a git repo."""
     if no_gitignore:
-        return sorted(vault_root.rglob("*.md"))
+        files = []
+        for ext in _INDEXABLE_EXTENSIONS:
+            files.extend(vault_root.rglob(f"*{ext}"))
+        return sorted(files)
     try:
+        git_args = [
+            "git",
+            "-C",
+            str(vault_root),
+            "-c",
+            "core.quotepath=false",
+            "ls-files",
+            "--cached",
+            "--others",
+            "--exclude-standard",
+        ]
+        patterns = [f"*{ext}" for ext in _INDEXABLE_EXTENSIONS]
         result = subprocess.run(
-            [
-                "git",
-                "-C",
-                str(vault_root),
-                "-c",
-                "core.quotepath=false",
-                "ls-files",
-                "--cached",
-                "--others",
-                "--exclude-standard",
-                "*.md",
-            ],
+            [*git_args, *patterns],
             capture_output=True,
             text=True,
             check=True,
         )
         return sorted(vault_root / line for line in result.stdout.splitlines() if line)
     except (subprocess.CalledProcessError, FileNotFoundError):
-        # Not a git repo or git not installed — fall back to rglob
-        return sorted(vault_root.rglob("*.md"))
+        files = []
+        for ext in _INDEXABLE_EXTENSIONS:
+            files.extend(vault_root.rglob(f"*{ext}"))
+        return sorted(files)
+
+
+def _extract_jsonl_text(raw: bytes) -> str | None:
+    """Extract searchable text from a Claude Code session JSONL file.
+
+    Extracts user prompts and assistant text blocks, skipping thinking/tool_use/progress.
+    Returns markdown-formatted text or None if no useful content.
+    """
+    parts: list[str] = []
+    for raw_line in raw.split(b"\n"):
+        stripped = raw_line.strip()
+        if not stripped:
+            continue
+        try:
+            rec = json.loads(stripped)
+        except (json.JSONDecodeError, ValueError):  # noqa: S112
+            continue
+
+        msg_type = rec.get("type", "")
+        msg = rec.get("message", {})
+        if not isinstance(msg, dict):
+            continue
+
+        if msg_type == "user":
+            content = msg.get("content", "")
+            if isinstance(content, str) and content.strip():
+                parts.append(f"## User\n{content.strip()}")
+            elif isinstance(content, list):
+                for block in content:
+                    if isinstance(block, dict) and block.get("type") == "text":
+                        text = block.get("text", "").strip()
+                        if text:
+                            parts.append(f"## User\n{text}")
+
+        elif msg_type == "assistant":
+            content = msg.get("content", [])
+            if isinstance(content, list):
+                texts = []
+                for block in content:
+                    if isinstance(block, dict) and block.get("type") == "text":
+                        text = block.get("text", "").strip()
+                        if text:
+                            texts.append(text)
+                if texts:
+                    parts.append(f"## Assistant\n{chr(10).join(texts)}")
+
+    if not parts:
+        return None
+    return "\n\n".join(parts)
 
 
 def _extract_links(content: str, source_rel_path: str) -> list[str]:
@@ -217,7 +276,7 @@ def index_file(
     vault_root: Path,
     embedder: Callable[[list[str]], np.ndarray],
 ) -> None:
-    """Index a single markdown file: insert into files, chunks, chunks_fts, chunks_vec."""
+    """Index a single file (.md or .jsonl): insert into files, chunks, chunks_fts, chunks_vec."""
     rel_path = f"{vault_root.name}/{file_path.relative_to(vault_root)}"
 
     # Single read: hash + decode
@@ -226,10 +285,16 @@ def index_file(
     except (FileNotFoundError, OSError):
         return  # skip broken symlinks or unreadable files
     file_hash = hashlib.sha256(raw).hexdigest()
-    try:
-        content = raw.decode("utf-8")
-    except UnicodeDecodeError:
-        return  # skip non-UTF-8 files
+
+    if file_path.suffix == ".jsonl":
+        content = _extract_jsonl_text(raw)
+        if not content:
+            return
+    else:
+        try:
+            content = raw.decode("utf-8")
+        except UnicodeDecodeError:
+            return  # skip non-UTF-8 files
 
     chunks = chunk_file(content)
     if not chunks:
@@ -364,7 +429,7 @@ def index_directory(
         (f"vault_root:{vault_name}", resolved),
     )
 
-    md_files = _list_md_files(vault_root, no_gitignore=no_gitignore)
+    md_files = _list_files(vault_root, no_gitignore=no_gitignore)
 
     if full:
         _remove_vault_files(conn, vault_name)

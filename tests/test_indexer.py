@@ -4,7 +4,7 @@ from mdvault.db import get_connection, init_db
 from mdvault.indexer import (
     Chunk,
     _extract_links,
-    _list_md_files,
+    _list_files,
     chunk_file,
     compute_sha256,
     index_directory,
@@ -461,10 +461,10 @@ def test_links_removed_on_file_delete(tmp_path, mock_embedder):
     conn.close()
 
 
-# ---------- _list_md_files ----------
+# ---------- _list_files ----------
 
 
-def test_list_md_files_respects_gitignore(tmp_path):
+def test_list_files_respects_gitignore(tmp_path):
     """Files in .gitignore are excluded when in a git repo."""
     vault = tmp_path / "vault"
     vault.mkdir()
@@ -479,20 +479,20 @@ def test_list_md_files_respects_gitignore(tmp_path):
     (vault / ".gitignore").write_text("node_modules/\n")
     subprocess.run(["git", "add", "."], cwd=vault, capture_output=True, check=True)
 
-    files = _list_md_files(vault)
+    files = _list_files(vault)
     names = [f.name for f in files]
     assert "visible.md" in names
     assert "dep.md" not in names
 
 
-def test_list_md_files_fallback_no_git(tmp_path):
+def test_list_files_fallback_no_git(tmp_path):
     """Without git, falls back to rglob and finds all .md files."""
     vault = tmp_path / "vault"
     vault.mkdir()
     (vault / "a.md").write_text("# A\n")
     (vault / "b.md").write_text("# B\n")
 
-    files = _list_md_files(vault)
+    files = _list_files(vault)
     names = {f.name for f in files}
     assert names == {"a.md", "b.md"}
 
@@ -522,6 +522,99 @@ def test_empty_files_not_indexed(tmp_path, mock_embedder):
     empty = conn.execute("SELECT COUNT(*) as c FROM chunks WHERE trim(raw_content) = ''").fetchone()["c"]
     conn.close()
     assert empty == 0
+
+
+# ---------- JSONL session indexing ----------
+
+
+def test_jsonl_session_indexed(tmp_path, mock_embedder):
+    """JSONL Claude Code session files are extracted and indexed."""
+    import json
+
+    vault = tmp_path / "vault"
+    projects = vault / "projects" / "my-project"
+    projects.mkdir(parents=True)
+
+    session = [
+        {"type": "user", "uuid": "1", "message": {"role": "user", "content": "How do I configure Kafka interceptors?"}},
+        {
+            "type": "assistant",
+            "uuid": "2",
+            "message": {
+                "role": "assistant",
+                "content": [
+                    {"type": "thinking", "thinking": "Let me think..."},
+                    {
+                        "type": "text",
+                        "text": "Kafka interceptors are configured via the Gateway plugin system.",
+                    },
+                ],
+            },
+        },
+        {"type": "progress", "uuid": "3", "data": {"type": "hook_progress"}},
+        {"type": "user", "uuid": "4", "message": {"role": "user", "content": "Show me an example with encryption"}},
+        {
+            "type": "assistant",
+            "uuid": "5",
+            "message": {
+                "role": "assistant",
+                "content": [
+                    {
+                        "type": "text",
+                        "text": "Here is an encryption interceptor example that protects sensitive fields.",
+                    },
+                ],
+            },
+        },
+    ]
+    jsonl_path = projects / "abc123.jsonl"
+    jsonl_path.write_text("\n".join(json.dumps(r) for r in session))
+
+    # Also add a regular .md
+    (vault / "readme.md").write_text("# Readme\n\n## Setup\n\nThis is a regular markdown file with enough words.\n")
+
+    db_p = tmp_path / "test.db"
+    init_db(db_p)
+    conn = get_connection(db_p)
+    index_directory(conn, vault, mock_embedder, full=True, no_gitignore=True)
+    conn.commit()
+
+    files = conn.execute("SELECT file_path FROM files ORDER BY file_path").fetchall()
+    paths = [r["file_path"] for r in files]
+    assert any("abc123.jsonl" in p for p in paths)
+    assert any("readme.md" in p for p in paths)
+
+    # Check that JSONL content was extracted (search for user prompt text)
+    chunks = conn.execute("SELECT raw_content FROM chunks").fetchall()
+    all_content = " ".join(c["raw_content"] for c in chunks)
+    assert "Kafka interceptors" in all_content
+    assert "encryption interceptor" in all_content
+    # Progress messages should NOT be in the content
+    assert "hook_progress" not in all_content
+    conn.close()
+
+
+def test_jsonl_empty_session_skipped(tmp_path, mock_embedder):
+    """JSONL files with no user/assistant messages are not indexed."""
+    import json
+
+    vault = tmp_path / "vault"
+    vault.mkdir()
+    session = [
+        {"type": "progress", "uuid": "1", "data": {"type": "hook_progress"}},
+        {"type": "progress", "uuid": "2", "data": {"type": "hook_progress"}},
+    ]
+    (vault / "empty.jsonl").write_text("\n".join(json.dumps(r) for r in session))
+
+    db_p = tmp_path / "test.db"
+    init_db(db_p)
+    conn = get_connection(db_p)
+    index_directory(conn, vault, mock_embedder, full=True, no_gitignore=True)
+    conn.commit()
+
+    count = conn.execute("SELECT COUNT(*) as c FROM files").fetchone()["c"]
+    conn.close()
+    assert count == 0
 
 
 # ---------- multi-vault ----------
