@@ -197,7 +197,7 @@ def search(
             else:
                 flat = " ".join(r["raw_content"].split())[:200]
                 typer.echo(f"{r['file_path']}:{r['chunk_idx']}")
-                typer.echo(f"  {flat}")
+                typer.echo(flat)
                 typer.echo("")
 
 
