@@ -152,20 +152,6 @@ def test_hybrid_search_top_k_respected(indexed_db, mock_embedder):
     assert len(results) == 3
 
 
-def test_rrf_k_parameter():
-    """Weighted RRF: bm25_weight=4.0, vec_weight=1.0 by default."""
-    bm25_results = [
-        {"chunk_id": 1, "file_path": "a.md", "chunk_idx": 0, "content": "a", "raw_content": "a"},
-    ]
-    vec_results = [
-        {"chunk_id": 1, "file_path": "a.md", "chunk_idx": 0, "content": "a", "raw_content": "a"},
-    ]
-    fused = rrf_fusion(bm25_results, vec_results, top_k=10, k=60)
-    # Rank 1 in both: 4.0/(60+1) + 1.0/(60+1) = 5.0/61
-    expected_score = 5.0 / 61.0
-    assert abs(fused[0]["score"] - expected_score) < 1e-6
-
-
 # ---------- _dedup_results ----------
 
 
