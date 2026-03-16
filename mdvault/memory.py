@@ -80,3 +80,39 @@ def store_memory(
         raise
 
     return {"id": mem_id, "file_id": file_id, "chunks": len(chunks)}
+
+
+def delete_memory(
+    conn: sqlite3.Connection,
+    id: str | None = None,
+    namespace: str | None = None,
+) -> int:
+    """Delete memories by id or namespace. Returns count of deleted memories."""
+    if id is None and namespace is None:
+        msg = "Must provide either id or namespace"
+        raise ValueError(msg)
+
+    if id is not None:
+        pattern = f"memory://%/{id}"
+    else:
+        pattern = f"memory://{namespace}/%"
+
+    count = conn.execute("SELECT COUNT(*) as c FROM files WHERE file_path LIKE ?", (pattern,)).fetchone()["c"]
+    if count == 0:
+        return 0
+
+    conn.execute(
+        "DELETE FROM chunks_fts WHERE rowid IN ("
+        "  SELECT c.id FROM chunks c JOIN files f ON c.file_id = f.id WHERE f.file_path LIKE ?"
+        ")",
+        (pattern,),
+    )
+    conn.execute(
+        "DELETE FROM chunks_vec WHERE rowid IN ("
+        "  SELECT c.id FROM chunks c JOIN files f ON c.file_id = f.id WHERE f.file_path LIKE ?"
+        ")",
+        (pattern,),
+    )
+    conn.execute("DELETE FROM files WHERE file_path LIKE ?", (pattern,))
+
+    return count

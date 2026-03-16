@@ -1,7 +1,7 @@
 import json
 
 from mdvault.db import get_connection
-from mdvault.memory import store_memory
+from mdvault.memory import delete_memory, store_memory
 
 
 def test_store_memory_creates_file_and_meta(db_path, mock_embedder):
@@ -95,4 +95,53 @@ def test_store_memory_returns_unique_ids(db_path, mock_embedder):
     r2 = store_memory(conn, "fact two content here", mock_embedder)
     conn.commit()
     assert r1["id"] != r2["id"]
+    conn.close()
+
+
+def test_delete_memory_by_id(db_path, mock_embedder):
+    """delete_memory by id removes file, meta, chunks, fts, vec."""
+    conn = get_connection(db_path)
+    result = store_memory(conn, "To delete this memory", mock_embedder, namespace="tmp")
+    conn.commit()
+
+    deleted = delete_memory(conn, id=result["id"])
+    conn.commit()
+
+    assert deleted == 1
+    assert conn.execute("SELECT COUNT(*) as c FROM files").fetchone()["c"] == 0
+    assert conn.execute("SELECT COUNT(*) as c FROM memory_meta").fetchone()["c"] == 0
+    assert conn.execute("SELECT COUNT(*) as c FROM chunks").fetchone()["c"] == 0
+    conn.close()
+
+
+def test_delete_memory_by_namespace(db_path, mock_embedder):
+    """delete_memory by namespace removes all memories in that namespace."""
+    conn = get_connection(db_path)
+    store_memory(conn, "Fact A in project", mock_embedder, namespace="project/x")
+    store_memory(conn, "Fact B in project", mock_embedder, namespace="project/x")
+    store_memory(conn, "Fact C in other ns", mock_embedder, namespace="other")
+    conn.commit()
+
+    deleted = delete_memory(conn, namespace="project/x")
+    conn.commit()
+
+    assert deleted == 2
+    assert conn.execute("SELECT COUNT(*) as c FROM files").fetchone()["c"] == 1
+    conn.close()
+
+
+def test_delete_memory_nonexistent_returns_zero(db_path):
+    """delete_memory with unknown id returns 0."""
+    conn = get_connection(db_path)
+    assert delete_memory(conn, id="nonexist") == 0
+    conn.close()
+
+
+def test_delete_memory_requires_id_or_namespace(db_path):
+    """delete_memory with neither id nor namespace raises ValueError."""
+    conn = get_connection(db_path)
+    import pytest as _pt
+
+    with _pt.raises(ValueError):
+        delete_memory(conn)
     conn.close()
