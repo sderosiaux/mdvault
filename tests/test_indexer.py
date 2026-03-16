@@ -4,6 +4,7 @@ import pytest
 from pathlib import Path
 from mdvault.db import get_connection, init_db
 from mdvault.indexer import (
+    Chunk,
     chunk_file,
     compute_sha256,
     index_file,
@@ -16,7 +17,7 @@ from tests.conftest import FIXTURES_DIR
 # ---------- chunk_file tests ----------
 
 def test_chunk_file_by_headings():
-    """File with 3 ## sections -> 3 chunks, each contains its heading."""
+    """File with 3 ## sections -> 3 Chunk objects, each contains its heading."""
     content = (
         "# Title\n\nIntro paragraph here.\n\n"
         "## Section One\n\nContent of section one with enough words to be valid "
@@ -28,11 +29,15 @@ def test_chunk_file_by_headings():
     )
     chunks = chunk_file(content)
     assert len(chunks) == 3
+    assert all(isinstance(c, Chunk) for c in chunks)
     # First chunk starts with its heading (no overlap prefix)
-    assert chunks[0].startswith("## Section One")
+    assert chunks[0].content.startswith("## Section One")
+    assert chunks[0].heading == "Section One"
     # Subsequent chunks have overlap prefix, but must contain their heading
-    assert "## Section Two" in chunks[1]
-    assert "## Section Three" in chunks[2]
+    assert "## Section Two" in chunks[1].content
+    assert chunks[1].heading == "Section Two"
+    assert "## Section Three" in chunks[2].content
+    assert chunks[2].heading == "Section Three"
 
 
 def test_chunk_file_no_headings():
@@ -47,7 +52,7 @@ def test_chunk_max_400_words():
     content = "## Big Section\n\n" + ("word " * 900)
     chunks = chunk_file(content)
     for chunk in chunks:
-        word_count = len(chunk.split())
+        word_count = len(chunk.content.split())
         # Allow overlap words (50) on top of 400
         assert word_count <= 460, f"Chunk too long: {word_count} words"
 
@@ -58,13 +63,9 @@ def test_chunk_overlap_50_words():
     content = "## Big Section\n\n" + ("word " * 900)
     chunks = chunk_file(content)
     assert len(chunks) >= 2
-    # Get last 50 words of chunk 0 (before overlap was applied to chunk 1)
-    # After overlap, chunk[1] should start with the last 50 words of the
-    # pre-overlap chunk[0]. Since chunk[0] itself has no overlap prefix,
-    # its words are the original words.
-    words_0 = chunks[0].split()
+    words_0 = chunks[0].content.split()
     last_50_of_0 = words_0[-50:]
-    words_1 = chunks[1].split()
+    words_1 = chunks[1].content.split()
     first_50_of_1 = words_1[:50]
     assert last_50_of_0 == first_50_of_1
 
@@ -79,7 +80,7 @@ def test_chunk_minimum_20_words():
     chunks = chunk_file(content)
     # "Tiny" section (<20 words) should be merged, so we get 1 chunk not 2
     assert len(chunks) == 1
-    assert "Just a few words." in chunks[0]
+    assert "Just a few words." in chunks[0].content
 
 
 # ---------- compute_sha256 ----------
@@ -113,6 +114,36 @@ def test_index_file_inserts_rows(db_path, mock_embedder):
     assert chunk_count > 0
     assert fts_count == chunk_count
     assert vec_count == chunk_count
+
+
+def test_index_file_contextual_prefix(db_path, mock_embedder):
+    """content has context prefix, raw_content has original text."""
+    nginx_path = FIXTURES_DIR / "infra" / "nginx.md"
+    conn = get_connection(db_path)
+    index_file(conn, nginx_path, FIXTURES_DIR, mock_embedder)
+    conn.commit()
+
+    row = conn.execute("SELECT content, raw_content FROM chunks LIMIT 1").fetchone()
+    conn.close()
+    # content starts with context prefix [path > ...]
+    assert row["content"].startswith("[infra/nginx.md")
+    # raw_content does NOT have the prefix
+    assert not row["raw_content"].startswith("[")
+
+
+def test_index_file_fts_searchable_via_context(db_path, mock_embedder):
+    """FTS5 can find chunks by file path thanks to context prefix."""
+    nginx_path = FIXTURES_DIR / "infra" / "nginx.md"
+    conn = get_connection(db_path)
+    index_file(conn, nginx_path, FIXTURES_DIR, mock_embedder)
+    conn.commit()
+
+    # Search by path component — wouldn't work without context prefix
+    rows = conn.execute(
+        "SELECT * FROM chunks_fts WHERE chunks_fts MATCH 'nginx'"
+    ).fetchall()
+    conn.close()
+    assert len(rows) > 0
 
 
 def test_index_file_fts_searchable(db_path, mock_embedder):
@@ -198,7 +229,7 @@ def test_incremental_reindex_modified_file(tmp_path, mock_embedder):
     index_directory(conn, vault, mock_embedder, full=True)
     conn.commit()
 
-    old_content = conn.execute("SELECT content FROM chunks LIMIT 1").fetchone()["content"]
+    old_content = conn.execute("SELECT raw_content FROM chunks LIMIT 1").fetchone()["raw_content"]
 
     # Modify file
     f.write_text("## Modified\n\nModified content that is long enough to form a valid chunk for indexing purposes here.\n")
@@ -206,7 +237,7 @@ def test_incremental_reindex_modified_file(tmp_path, mock_embedder):
     incremental_index(conn, vault, mock_embedder)
     conn.commit()
 
-    new_content = conn.execute("SELECT content FROM chunks LIMIT 1").fetchone()["content"]
+    new_content = conn.execute("SELECT raw_content FROM chunks LIMIT 1").fetchone()["raw_content"]
     conn.close()
     assert old_content != new_content
 

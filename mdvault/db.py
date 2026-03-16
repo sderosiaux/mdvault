@@ -37,10 +37,11 @@ def init_db(db_path: str | Path, vault_root: str) -> None:
         );
 
         CREATE TABLE IF NOT EXISTS chunks (
-            id        INTEGER PRIMARY KEY,
-            file_id   INTEGER NOT NULL REFERENCES files(id) ON DELETE CASCADE,
-            chunk_idx INTEGER NOT NULL,
-            content   TEXT NOT NULL
+            id          INTEGER PRIMARY KEY,
+            file_id     INTEGER NOT NULL REFERENCES files(id) ON DELETE CASCADE,
+            chunk_idx   INTEGER NOT NULL,
+            content     TEXT NOT NULL,
+            raw_content TEXT NOT NULL
         );
 
         CREATE INDEX IF NOT EXISTS idx_chunks_file_id ON chunks(file_id);
@@ -67,6 +68,12 @@ def init_db(db_path: str | Path, vault_root: str) -> None:
         (vault_root,),
     )
     conn.commit()
+
+    # Migrate older DBs that lack raw_content column
+    cols = {row[1] for row in conn.execute("PRAGMA table_info(chunks)").fetchall()}
+    if "raw_content" not in cols:
+        conn.execute("ALTER TABLE chunks ADD COLUMN raw_content TEXT NOT NULL DEFAULT ''")
+        conn.commit()
 
     # Re-enable foreign keys (executescript resets pragmas)
     conn.execute("PRAGMA foreign_keys = ON")

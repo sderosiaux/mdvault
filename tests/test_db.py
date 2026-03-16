@@ -37,7 +37,7 @@ def test_foreign_keys_enabled(db_path):
     conn = get_connection(db_path)
     with pytest.raises(sqlite3.IntegrityError):
         conn.execute(
-            "INSERT INTO chunks (file_id, chunk_idx, content) VALUES (9999, 0, 'test')"
+            "INSERT INTO chunks (file_id, chunk_idx, content, raw_content) VALUES (9999, 0, 'test', 'test')"
         )
     conn.close()
 
@@ -50,10 +50,10 @@ def test_cascade_delete_removes_chunks(db_path):
     )
     file_id = conn.execute("SELECT id FROM files WHERE file_path = 'test.md'").fetchone()["id"]
     conn.execute(
-        "INSERT INTO chunks (file_id, chunk_idx, content) VALUES (?, 0, 'hello')", (file_id,)
+        "INSERT INTO chunks (file_id, chunk_idx, content, raw_content) VALUES (?, 0, 'hello', 'hello')", (file_id,)
     )
     conn.execute(
-        "INSERT INTO chunks (file_id, chunk_idx, content) VALUES (?, 1, 'world')", (file_id,)
+        "INSERT INTO chunks (file_id, chunk_idx, content, raw_content) VALUES (?, 1, 'world', 'world')", (file_id,)
     )
     conn.commit()
     assert conn.execute("SELECT COUNT(*) as c FROM chunks").fetchone()["c"] == 2
@@ -70,7 +70,7 @@ def test_chunks_fts_exists(db_path):
     conn.execute("INSERT INTO files (file_path, file_hash) VALUES ('t.md', 'h')")
     file_id = conn.execute("SELECT id FROM files WHERE file_path = 't.md'").fetchone()["id"]
     conn.execute(
-        "INSERT INTO chunks (file_id, chunk_idx, content) VALUES (?, 0, 'test content')",
+        "INSERT INTO chunks (file_id, chunk_idx, content, raw_content) VALUES (?, 0, 'test content', 'test content')",
         (file_id,),
     )
     chunk_id = conn.execute("SELECT id FROM chunks").fetchone()["id"]

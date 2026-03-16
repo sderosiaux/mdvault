@@ -24,6 +24,7 @@ def bm25_search(
             f.file_path,
             c.chunk_idx,
             c.content,
+            c.raw_content,
             fts.rank AS bm25_rank
         FROM chunks_fts fts
         JOIN chunks c ON c.id = fts.rowid
@@ -57,24 +58,32 @@ def vector_search(
         (blob, top_k),
     ).fetchall()
 
+    if not rows:
+        return []
+
+    chunk_ids = [row["chunk_id"] for row in rows]
+    placeholders = ",".join("?" * len(chunk_ids))
+    details = conn.execute(
+        f"""
+        SELECT c.id, c.chunk_idx, c.content, c.raw_content, f.file_path
+        FROM chunks c
+        JOIN files f ON f.id = c.file_id
+        WHERE c.id IN ({placeholders})
+        """,
+        chunk_ids,
+    ).fetchall()
+    detail_map = {d["id"]: d for d in details}
+
     results = []
     for row in rows:
-        chunk_id = row["chunk_id"]
-        detail = conn.execute(
-            """
-            SELECT c.chunk_idx, c.content, f.file_path
-            FROM chunks c
-            JOIN files f ON f.id = c.file_id
-            WHERE c.id = ?
-            """,
-            (chunk_id,),
-        ).fetchone()
-        if detail:
+        d = detail_map.get(row["chunk_id"])
+        if d:
             results.append({
-                "chunk_id": chunk_id,
-                "file_path": detail["file_path"],
-                "chunk_idx": detail["chunk_idx"],
-                "content": detail["content"],
+                "chunk_id": row["chunk_id"],
+                "file_path": d["file_path"],
+                "chunk_idx": d["chunk_idx"],
+                "content": d["content"],
+                "raw_content": d["raw_content"],
                 "distance": row["distance"],
             })
     return results
@@ -104,11 +113,13 @@ def rrf_fusion(
     sorted_ids = sorted(scores.keys(), key=lambda cid: scores[cid], reverse=True)
     results = []
     for cid in sorted_ids[:top_k]:
+        m = metadata[cid]
         entry = {
-            "chunk_id": metadata[cid]["chunk_id"],
-            "file_path": metadata[cid]["file_path"],
-            "chunk_idx": metadata[cid]["chunk_idx"],
-            "content": metadata[cid]["content"],
+            "chunk_id": m["chunk_id"],
+            "file_path": m["file_path"],
+            "chunk_idx": m["chunk_idx"],
+            "content": m["content"],
+            "raw_content": m["raw_content"],
             "score": scores[cid],
         }
         results.append(entry)

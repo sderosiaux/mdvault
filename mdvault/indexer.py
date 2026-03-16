@@ -1,6 +1,7 @@
 import hashlib
 import re
 import sqlite3
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable
 
@@ -9,69 +10,94 @@ import numpy as np
 from mdvault.db import serialize_f32
 
 
-def chunk_file(content: str) -> list[str]:
+@dataclass
+class Chunk:
+    content: str
+    heading: str | None = None
+
+
+def _extract_title(content: str) -> str | None:
+    """Extract the first # heading as document title."""
+    for line in content.split("\n"):
+        stripped = line.strip()
+        if stripped.startswith("# ") and not stripped.startswith("## "):
+            return stripped[2:].rstrip("#").strip()
+    return None
+
+
+def _context_prefix(rel_path: str, title: str | None, heading: str | None) -> str:
+    """Build context prefix like [path > title > heading]."""
+    parts = [rel_path]
+    if title:
+        parts.append(title)
+    if heading and heading != title:
+        parts.append(heading)
+    return f"[{' > '.join(parts)}]\n"
+
+
+def chunk_file(content: str) -> list[Chunk]:
     """Split markdown content into chunks by ## headings, with overlap and merging."""
-    # Split by ## or ### headings
     heading_pattern = re.compile(r"^(#{2,3}\s)", re.MULTILINE)
     parts = heading_pattern.split(content)
 
-    # Reassemble into blocks: before first heading is preamble, then heading+content pairs
-    blocks: list[str] = []
-    i = 0
-    # parts[0] is text before first heading match
+    # Reassemble into blocks: (text, heading_text)
+    blocks: list[tuple[str, str | None]] = []
     preamble = parts[0].strip()
     if preamble:
-        # Only keep preamble if it has substance (skip top-level # Title lines)
         preamble_lines = preamble.split("\n")
         non_title_lines = [l for l in preamble_lines if not l.startswith("# ")]
         preamble_text = "\n".join(non_title_lines).strip()
         if preamble_text and len(preamble_text.split()) >= 20:
-            blocks.append(preamble_text)
+            blocks.append((preamble_text, None))
     i = 1
     while i < len(parts):
         if heading_pattern.match(parts[i]):
             heading_marker = parts[i]
             body = parts[i + 1] if i + 1 < len(parts) else ""
-            blocks.append(heading_marker + body.strip())
+            block_text = heading_marker + body.strip()
+            heading_text = block_text.split("\n", 1)[0].lstrip("#").strip()
+            blocks.append((block_text, heading_text))
             i += 2
         else:
             i += 1
 
-    # If no headings found, treat entire content as one block
     if not blocks:
-        blocks = [content.strip()]
+        blocks = [(content.strip(), None)]
 
-    # Now split oversized blocks
-    final_chunks: list[str] = []
-    for block in blocks:
-        sub_chunks = _split_oversized(block, max_words=400)
-        final_chunks.extend(sub_chunks)
+    # Split oversized blocks (preserve heading association)
+    final_chunks: list[tuple[str, str | None]] = []
+    for text, heading in blocks:
+        sub_chunks = _split_oversized(text, max_words=400)
+        for sc in sub_chunks:
+            final_chunks.append((sc, heading))
 
-    # Merge tiny chunks (<20 words) into previous BEFORE overlap
-    merged: list[str] = []
-    for chunk in final_chunks:
-        if len(chunk.split()) < 20 and merged:
-            merged[-1] = merged[-1] + "\n\n" + chunk
+    # Merge tiny chunks (<20 words) into previous
+    merged: list[tuple[str, str | None]] = []
+    for text, heading in final_chunks:
+        if len(text.split()) < 20 and merged:
+            prev_text, prev_heading = merged[-1]
+            merged[-1] = (prev_text + "\n\n" + text, prev_heading)
         else:
-            merged.append(chunk)
+            merged.append((text, heading))
 
-    # Final check: if last chunk is too small, merge it
-    if len(merged) > 1 and len(merged[-1].split()) < 20:
-        merged[-2] = merged[-2] + "\n\n" + merged[-1]
+    if len(merged) > 1 and len(merged[-1][0].split()) < 20:
+        prev_text, prev_heading = merged[-2]
+        last_text, _ = merged[-1]
+        merged[-2] = (prev_text + "\n\n" + last_text, prev_heading)
         merged.pop()
 
-    # Apply overlap between chunks AFTER merge
+    # Apply overlap between chunks
     if len(merged) > 1:
         overlapped = [merged[0]]
         for i in range(1, len(merged)):
-            prev_words = merged[i - 1].split()
+            prev_words = merged[i - 1][0].split()
             overlap_words = prev_words[-50:] if len(prev_words) >= 50 else prev_words
             overlap_text = " ".join(overlap_words)
-            current = merged[i]
-            overlapped.append(overlap_text + " " + current)
+            current_text, current_heading = merged[i]
+            overlapped.append((overlap_text + " " + current_text, current_heading))
         merged = overlapped
 
-    return merged
+    return [Chunk(content=text, heading=heading) for text, heading in merged]
 
 
 def _split_oversized(block: str, max_words: int = 400) -> list[str]:
@@ -144,6 +170,8 @@ def index_file(
     if not chunks:
         return
 
+    title = _extract_title(content)
+
     conn.execute(
         "INSERT INTO files (file_path, file_hash) VALUES (?, ?)",
         (rel_path, file_hash),
@@ -152,25 +180,29 @@ def index_file(
         "SELECT id FROM files WHERE file_path = ?", (rel_path,)
     ).fetchone()["id"]
 
+    # Build contextualized texts for embedding and FTS
+    ctx_texts = []
+    for chunk in chunks:
+        prefix = _context_prefix(rel_path, title, chunk.heading)
+        ctx_texts.append(prefix + chunk.content)
+
     # Embed in batches of 32
     all_embeddings = []
-    for batch_start in range(0, len(chunks), 32):
-        batch = chunks[batch_start : batch_start + 32]
+    for batch_start in range(0, len(ctx_texts), 32):
+        batch = ctx_texts[batch_start : batch_start + 32]
         batch_embeddings = embedder(batch)
         all_embeddings.append(batch_embeddings)
     embeddings = np.concatenate(all_embeddings, axis=0)
 
-    for idx, (chunk_text, embedding) in enumerate(zip(chunks, embeddings)):
-        conn.execute(
-            "INSERT INTO chunks (file_id, chunk_idx, content) VALUES (?, ?, ?)",
-            (file_id, idx, chunk_text),
+    for idx, (chunk, ctx_text, embedding) in enumerate(zip(chunks, ctx_texts, embeddings)):
+        cursor = conn.execute(
+            "INSERT INTO chunks (file_id, chunk_idx, content, raw_content) VALUES (?, ?, ?, ?)",
+            (file_id, idx, ctx_text, chunk.content),
         )
-        chunk_id = conn.execute(
-            "SELECT last_insert_rowid() as id"
-        ).fetchone()["id"]
+        chunk_id = cursor.lastrowid
         conn.execute(
             "INSERT INTO chunks_fts(rowid, content) VALUES (?, ?)",
-            (chunk_id, chunk_text),
+            (chunk_id, ctx_text),
         )
         conn.execute(
             "INSERT INTO chunks_vec(rowid, embedding) VALUES (?, ?)",
@@ -213,7 +245,6 @@ def index_directory(
 
     if full:
         # Wipe existing data
-        # Get all existing chunk ids for FTS/vec cleanup
         existing_chunks = [
             row["id"] for row in conn.execute("SELECT id FROM chunks").fetchall()
         ]

@@ -70,12 +70,12 @@ def test_vector_search_returns_ranked_results(indexed_db, mock_embedder):
 def test_rrf_fusion_combines_both_lists():
     """A result in both lists scores higher than one in only one list."""
     bm25_results = [
-        {"chunk_id": 1, "file_path": "a.md", "chunk_idx": 0, "content": "a"},
-        {"chunk_id": 2, "file_path": "b.md", "chunk_idx": 0, "content": "b"},
+        {"chunk_id": 1, "file_path": "a.md", "chunk_idx": 0, "content": "a", "raw_content": "a"},
+        {"chunk_id": 2, "file_path": "b.md", "chunk_idx": 0, "content": "b", "raw_content": "b"},
     ]
     vec_results = [
-        {"chunk_id": 1, "file_path": "a.md", "chunk_idx": 0, "content": "a"},
-        {"chunk_id": 3, "file_path": "c.md", "chunk_idx": 0, "content": "c"},
+        {"chunk_id": 1, "file_path": "a.md", "chunk_idx": 0, "content": "a", "raw_content": "a"},
+        {"chunk_id": 3, "file_path": "c.md", "chunk_idx": 0, "content": "c", "raw_content": "c"},
     ]
     fused = rrf_fusion(bm25_results, vec_results, top_k=10)
     # chunk_id=1 is in both lists, should have highest score
@@ -86,7 +86,7 @@ def test_rrf_fusion_combines_both_lists():
 def test_rrf_fusion_chunk_in_only_bm25():
     """Chunk absent from vec list still appears with partial score."""
     bm25_results = [
-        {"chunk_id": 10, "file_path": "x.md", "chunk_idx": 0, "content": "x"},
+        {"chunk_id": 10, "file_path": "x.md", "chunk_idx": 0, "content": "x", "raw_content": "x"},
     ]
     vec_results = []
     fused = rrf_fusion(bm25_results, vec_results, top_k=10)
@@ -99,7 +99,7 @@ def test_rrf_fusion_chunk_in_only_vec():
     """Chunk absent from bm25 list still appears with partial score."""
     bm25_results = []
     vec_results = [
-        {"chunk_id": 20, "file_path": "y.md", "chunk_idx": 0, "content": "y"},
+        {"chunk_id": 20, "file_path": "y.md", "chunk_idx": 0, "content": "y", "raw_content": "y"},
     ]
     fused = rrf_fusion(bm25_results, vec_results, top_k=10)
     assert len(fused) == 1
@@ -119,6 +119,7 @@ def test_hybrid_search_end_to_end(indexed_db, mock_embedder):
     assert "file_path" in r
     assert "chunk_idx" in r
     assert "content" in r
+    assert "raw_content" in r
     assert "score" in r
 
 
@@ -143,10 +144,10 @@ def test_hybrid_search_top_k_respected(indexed_db, mock_embedder):
 def test_rrf_k_parameter():
     """k=60 is default; rrf score formula: 1/(60+rank)."""
     bm25_results = [
-        {"chunk_id": 1, "file_path": "a.md", "chunk_idx": 0, "content": "a"},
+        {"chunk_id": 1, "file_path": "a.md", "chunk_idx": 0, "content": "a", "raw_content": "a"},
     ]
     vec_results = [
-        {"chunk_id": 1, "file_path": "a.md", "chunk_idx": 0, "content": "a"},
+        {"chunk_id": 1, "file_path": "a.md", "chunk_idx": 0, "content": "a", "raw_content": "a"},
     ]
     fused = rrf_fusion(bm25_results, vec_results, top_k=10, k=60)
     # Rank 1 in both: 1/(60+1) + 1/(60+1) = 2/61

@@ -92,7 +92,7 @@ def search(
             f"[{i}] {r['file_path']} (chunk {r['chunk_idx']}) — score {r['score']:.3f}"
         )
         typer.echo("─" * 42)
-        content_preview = r["content"][:500]
+        content_preview = r["raw_content"][:500]
         typer.echo(content_preview)
         typer.echo("─" * 42)
         typer.echo("")

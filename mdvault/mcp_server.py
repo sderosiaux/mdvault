@@ -44,7 +44,7 @@ def search_vault(query: str, top_k: int = 5) -> dict:
             {
                 "file_path": r["file_path"],
                 "chunk_idx": r["chunk_idx"],
-                "content": r["content"],
+                "content": r["raw_content"],
                 "score": round(r["score"], 4),
             }
             for r in results
