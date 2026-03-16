@@ -54,6 +54,17 @@ def init_db(db_path: str | Path) -> None:
 
         CREATE INDEX IF NOT EXISTS idx_links_source ON links(source_file_id);
         CREATE INDEX IF NOT EXISTS idx_links_target ON links(target_path);
+
+        CREATE TABLE IF NOT EXISTS memory_meta (
+            file_id    INTEGER PRIMARY KEY REFERENCES files(id) ON DELETE CASCADE,
+            namespace  TEXT NOT NULL DEFAULT '',
+            source     TEXT NOT NULL DEFAULT 'api',
+            metadata   TEXT NOT NULL DEFAULT '{}',
+            created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+            updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_memory_ns ON memory_meta(namespace);
     """)
 
     # FTS5 virtual table (external content)
