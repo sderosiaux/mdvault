@@ -452,6 +452,30 @@ def test_hybrid_search_triggers_promotion_cycle(db_path, mock_embedder):
     conn.close()
 
 
+def test_hybrid_search_excludes_gap_memories(db_path, mock_embedder):
+    """Gap memories are never returned in search results."""
+    conn = get_connection(db_path)
+    store_memory(
+        conn,
+        "[Knowledge gap] Recurring query with no good results: terraform locking",
+        mock_embedder,
+        namespace="gaps",
+        source="promoted",
+        metadata={"gap": True},
+    )
+    conn.commit()
+
+    results = hybrid_search(
+        conn,
+        "terraform locking",
+        mock_embedder,
+        top_k=10,
+    )
+    gap_results = [r for r in results if "gaps" in r.get("file_path", "")]
+    assert len(gap_results) == 0
+    conn.close()
+
+
 def test_hybrid_search_no_filter_returns_all(db_path, mock_embedder):
     """Default search (no source filter) returns both files and memories."""
     conn = get_connection(db_path)

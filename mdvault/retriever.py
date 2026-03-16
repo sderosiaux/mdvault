@@ -389,6 +389,7 @@ def hybrid_search(
         _has_mem = conn.execute("SELECT 1 FROM memory_meta LIMIT 1").fetchone()
         if _has_mem:
             mem_bm25 = bm25_search(conn, query, top_k=10, source="memories", namespace=namespace)
+            mem_bm25 = [r for r in mem_bm25 if "memory://gaps/" not in r["file_path"]]
             if mem_bm25:
                 existing_map = {r["chunk_id"]: r for r in deduped}
                 anchor_idx = min(top_k - 1, len(deduped) - 1) if deduped else 0
@@ -453,6 +454,7 @@ def hybrid_search(
     except sqlite3.OperationalError:  # noqa: S110
         pass  # table may not exist in older DBs
 
+    deduped = [r for r in deduped if "memory://gaps/" not in r.get("file_path", "")]
     return deduped[:top_k]
 
 

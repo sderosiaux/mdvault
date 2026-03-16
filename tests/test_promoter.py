@@ -115,6 +115,45 @@ def test_promote_respects_max_promotions(db_path, mock_embedder):
     conn.close()
 
 
+def test_full_lifecycle(db_path, mock_embedder):
+    """End-to-end: store, search, hit tracking, query logging, clustering."""
+    from mdvault.retriever import hybrid_search
+
+    conn = get_connection(db_path)
+
+    store_memory(
+        conn,
+        "Kafka timeout is controlled by max.poll.interval.ms setting",
+        mock_embedder,
+        namespace="kb",
+        source="user",
+    )
+    conn.commit()
+
+    # Search 20 times to trigger promotion cycle
+    for _ in range(20):
+        hybrid_search(
+            conn,
+            "kafka timeout configuration",
+            mock_embedder,
+            top_k=3,
+        )
+
+    # Verify query logging
+    q_count = conn.execute("SELECT COUNT(*) as c FROM query_log").fetchone()["c"]
+    assert q_count >= 20
+
+    # Verify clustering happened
+    clusters = conn.execute("SELECT * FROM query_clusters").fetchall()
+    assert len(clusters) >= 1
+
+    # Verify hit tracking on the memory
+    meta = conn.execute("SELECT hit_count FROM memory_meta LIMIT 1").fetchone()
+    assert meta["hit_count"] > 0
+
+    conn.close()
+
+
 def test_promote_skips_already_promoted(db_path, mock_embedder):
     """Clusters already promoted are skipped."""
     conn = get_connection(db_path)
