@@ -1,7 +1,7 @@
 import json
 
 from mdvault.db import get_connection
-from mdvault.memory import delete_memory, store_memory
+from mdvault.memory import delete_memory, store_memory, update_memory
 
 
 def test_store_memory_creates_file_and_meta(db_path, mock_embedder):
@@ -144,4 +144,66 @@ def test_delete_memory_requires_id_or_namespace(db_path):
 
     with _pt.raises(ValueError):
         delete_memory(conn)
+    conn.close()
+
+
+def test_update_memory_content(db_path, mock_embedder):
+    """update_memory replaces content, re-chunks, re-embeds."""
+    conn = get_connection(db_path)
+    result = store_memory(conn, "Old fact content here", mock_embedder, namespace="user")
+    conn.commit()
+
+    update_memory(conn, result["id"], mock_embedder, content="New fact updated content")
+    conn.commit()
+
+    chunk = conn.execute("SELECT raw_content FROM chunks").fetchone()
+    assert "New fact" in chunk["raw_content"]
+    assert conn.execute("SELECT COUNT(*) as c FROM chunks").fetchone()["c"] == 1
+    conn.close()
+
+
+def test_update_memory_metadata_only(db_path, mock_embedder):
+    """update_memory can update metadata without touching content."""
+    conn = get_connection(db_path)
+    result = store_memory(conn, "Keep this content intact", mock_embedder)
+    conn.commit()
+
+    update_memory(conn, result["id"], mock_embedder, metadata={"reviewed": True})
+    conn.commit()
+
+    meta = conn.execute("SELECT metadata FROM memory_meta").fetchone()
+    assert json.loads(meta["metadata"])["reviewed"] is True
+
+    chunk = conn.execute("SELECT raw_content FROM chunks").fetchone()
+    assert chunk["raw_content"] == "Keep this content intact"
+    conn.close()
+
+
+def test_update_memory_updates_timestamp(db_path, mock_embedder):
+    """update_memory sets updated_at."""
+    conn = get_connection(db_path)
+    result = store_memory(conn, "Timestamped content here", mock_embedder)
+    conn.commit()
+
+    meta_before = conn.execute("SELECT created_at, updated_at FROM memory_meta").fetchone()
+
+    import time
+
+    time.sleep(1.1)
+
+    update_memory(conn, result["id"], mock_embedder, content="Changed content now")
+    conn.commit()
+
+    meta_after = conn.execute("SELECT updated_at FROM memory_meta").fetchone()
+    assert meta_after["updated_at"] > meta_before["updated_at"]
+    conn.close()
+
+
+def test_update_memory_nonexistent_raises(db_path, mock_embedder):
+    """update_memory with unknown id raises ValueError."""
+    conn = get_connection(db_path)
+    import pytest as _pt
+
+    with _pt.raises(ValueError):
+        update_memory(conn, "nonexist", mock_embedder, content="x")
     conn.close()
