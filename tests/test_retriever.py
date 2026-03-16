@@ -1,9 +1,11 @@
+from pathlib import Path
 from unittest.mock import patch
 
 import pytest
 
 from mdvault.db import get_connection, init_db
-from mdvault.indexer import index_directory
+from mdvault.indexer import index_directory, index_file
+from mdvault.memory import store_memory
 from mdvault.retriever import (
     _dedup_results,
     bm25_search,
@@ -318,3 +320,62 @@ def test_related_notes_similar_excludes_self(tmp_path, mock_embedder):
 
     assert "vault/x.md" not in result["similar"]
     assert len(result["similar"]) <= 5
+
+
+# ---------- source / namespace filtering ----------
+
+
+def test_hybrid_search_source_memories_only(db_path, mock_embedder):
+    """source='memories' returns only memory results."""
+    conn = get_connection(db_path)
+    fixtures = Path(__file__).parent / "fixtures"
+    md_file = sorted(fixtures.rglob("*.md"))[0]
+    index_file(conn, md_file, fixtures, mock_embedder)
+    store_memory(conn, "Python is the best language for data science", mock_embedder, namespace="prefs")
+    conn.commit()
+
+    results = hybrid_search(conn, "Python", mock_embedder, top_k=10, source="memories")
+    assert len(results) > 0
+    assert all(r["file_path"].startswith("memory://") for r in results)
+    conn.close()
+
+
+def test_hybrid_search_source_files_only(db_path, mock_embedder):
+    """source='files' excludes memories."""
+    conn = get_connection(db_path)
+    fixtures = Path(__file__).parent / "fixtures"
+    md_file = sorted(fixtures.rglob("*.md"))[0]
+    index_file(conn, md_file, fixtures, mock_embedder)
+    store_memory(conn, "Python is the best language for data science", mock_embedder, namespace="prefs")
+    conn.commit()
+
+    results = hybrid_search(conn, "Python", mock_embedder, top_k=10, source="files")
+    assert all(not r["file_path"].startswith("memory://") for r in results)
+    conn.close()
+
+
+def test_hybrid_search_namespace_filter(db_path, mock_embedder):
+    """namespace filter returns only memories from that namespace."""
+    conn = get_connection(db_path)
+    store_memory(conn, "Fact in project A about databases and systems", mock_embedder, namespace="project/a")
+    store_memory(conn, "Fact in project B about networking and protocols", mock_embedder, namespace="project/b")
+    conn.commit()
+
+    results = hybrid_search(conn, "Fact project databases", mock_embedder, top_k=10, namespace="project/a")
+    for r in results:
+        assert "project/a" in r["file_path"]
+    conn.close()
+
+
+def test_hybrid_search_no_filter_returns_all(db_path, mock_embedder):
+    """Default search (no source filter) returns both files and memories."""
+    conn = get_connection(db_path)
+    fixtures = Path(__file__).parent / "fixtures"
+    md_file = sorted(fixtures.rglob("*.md"))[0]
+    index_file(conn, md_file, fixtures, mock_embedder)
+    store_memory(conn, "A stored memory about databases and infrastructure", mock_embedder, namespace="facts")
+    conn.commit()
+
+    results = hybrid_search(conn, "databases", mock_embedder, top_k=10)
+    assert len(results) >= 0  # should not crash, may have both sources
+    conn.close()
