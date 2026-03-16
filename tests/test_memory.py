@@ -199,6 +199,24 @@ def test_update_memory_updates_timestamp(db_path, mock_embedder):
     conn.close()
 
 
+def test_store_memory_confidence_by_source(db_path, mock_embedder):
+    """Confidence is set based on source: user=0.7, agent=0.5, promoted=0.3."""
+    conn = get_connection(db_path)
+    r1 = store_memory(conn, "User memory content here", mock_embedder, source="user")
+    r2 = store_memory(conn, "Agent memory content here", mock_embedder, source="agent")
+    r3 = store_memory(conn, "Promoted memory content", mock_embedder, source="promoted")
+    conn.commit()
+
+    c1 = conn.execute("SELECT confidence FROM memory_meta WHERE file_id = ?", (r1["file_id"],)).fetchone()
+    c2 = conn.execute("SELECT confidence FROM memory_meta WHERE file_id = ?", (r2["file_id"],)).fetchone()
+    c3 = conn.execute("SELECT confidence FROM memory_meta WHERE file_id = ?", (r3["file_id"],)).fetchone()
+    conn.close()
+
+    assert c1["confidence"] == 0.7
+    assert c2["confidence"] == 0.5
+    assert c3["confidence"] == 0.3
+
+
 def test_update_memory_nonexistent_raises(db_path, mock_embedder):
     """update_memory with unknown id raises ValueError."""
     conn = get_connection(db_path)
