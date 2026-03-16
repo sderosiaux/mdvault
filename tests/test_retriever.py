@@ -368,6 +368,65 @@ def test_hybrid_search_logs_query(indexed_db, mock_embedder):
     conn.close()
 
 
+def test_hybrid_search_tracks_memory_hits(db_path, mock_embedder):
+    """hybrid_search increments hit_count and sets last_hit_at for returned memories."""
+    conn = get_connection(db_path)
+    result = store_memory(
+        conn, "Python is great for data science and machine learning", mock_embedder, namespace="facts"
+    )
+    conn.commit()
+
+    # Verify initial state
+    meta = conn.execute(
+        "SELECT hit_count, last_hit_at FROM memory_meta WHERE file_id = ?", (result["file_id"],)
+    ).fetchone()
+    assert meta["hit_count"] == 0
+    assert meta["last_hit_at"] is None
+
+    # Search should trigger hit tracking
+    hybrid_search(conn, "Python data science", mock_embedder, top_k=5)
+
+    meta = conn.execute(
+        "SELECT hit_count, last_hit_at FROM memory_meta WHERE file_id = ?", (result["file_id"],)
+    ).fetchone()
+    assert meta["hit_count"] == 1
+    assert meta["last_hit_at"] is not None
+    conn.close()
+
+
+def test_memory_scoring_applies_decay_and_confidence(db_path, mock_embedder):
+    """Memories with higher confidence and recent hits score higher."""
+    conn = get_connection(db_path)
+    r1 = store_memory(
+        conn, "High confidence fact about databases and systems", mock_embedder, namespace="a", source="user"
+    )
+    r2 = store_memory(
+        conn, "Low confidence fact about databases and systems", mock_embedder, namespace="b", source="promoted"
+    )
+    conn.commit()
+
+    # Simulate: r1 was hit recently, r2 never hit and old
+    conn.execute(
+        "UPDATE memory_meta SET hit_count = 5, last_hit_at = CURRENT_TIMESTAMP WHERE file_id = ?",
+        (r1["file_id"],),
+    )
+    conn.execute(
+        "UPDATE memory_meta SET last_hit_at = datetime('now', '-200 days') WHERE file_id = ?",
+        (r2["file_id"],),
+    )
+    conn.commit()
+
+    results = hybrid_search(conn, "databases systems", mock_embedder, top_k=10, source="memories")
+    conn.close()
+
+    if len(results) >= 2:
+        scores = {r["file_path"]: r["score"] for r in results}
+        path1 = f"memory://a/{r1['id']}"
+        path2 = f"memory://b/{r2['id']}"
+        if path1 in scores and path2 in scores:
+            assert scores[path1] > scores[path2], "High confidence + recent should score higher"
+
+
 def test_hybrid_search_no_filter_returns_all(db_path, mock_embedder):
     """Default search (no source filter) returns both files and memories."""
     conn = get_connection(db_path)

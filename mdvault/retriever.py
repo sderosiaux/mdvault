@@ -4,6 +4,8 @@ import sqlite3
 import urllib.error
 import urllib.request
 from collections.abc import Callable
+from datetime import UTC, datetime
+from math import log2
 
 import numpy as np
 
@@ -228,6 +230,32 @@ def _dedup_results(results: list[dict], conn: sqlite3.Connection, top_k: int) ->
     return deduped
 
 
+def _memory_weight(conn: sqlite3.Connection, file_id: int) -> float:
+    """Compute decay * confidence for a memory."""
+    row = conn.execute(
+        "SELECT source, confidence, hit_count, last_hit_at, created_at FROM memory_meta WHERE file_id = ?",
+        (file_id,),
+    ).fetchone()
+    if not row:
+        return 1.0
+
+    # Confidence: base + hit boost
+    base = {"user": 0.7, "agent": 0.5, "promoted": 0.3, "cli": 0.7}.get(row["source"], 0.5)
+    hit_boost = min(0.3, 0.1 * log2(1 + row["hit_count"]))
+    confidence = min(1.0, base + hit_boost)
+
+    # Decay: linear over 180 days, floor 0.1
+    ref = row["last_hit_at"] or row["created_at"]
+    if ref:
+        ref_dt = datetime.fromisoformat(ref)
+        days = (datetime.now(tz=UTC) - ref_dt.replace(tzinfo=UTC)).days
+        decay = max(0.1, 1.0 - days / 180)
+    else:
+        decay = 1.0
+
+    return decay * confidence
+
+
 def hybrid_search(
     conn: sqlite3.Connection,
     query: str,
@@ -371,7 +399,9 @@ def hybrid_search(
                     covered = sum(1 for t in query_terms if any(t in w or w in t for w in raw_words))
                     cov_ratio = covered / len(query_terms) if query_terms else 0
                     base = anchor + (top_score - anchor) * cov_ratio
-                    mem_score = base / (1 + rank * 0.15) + 0.08
+                    file_row = conn.execute("SELECT id FROM files WHERE file_path = ?", (r["file_path"],)).fetchone()
+                    weight = _memory_weight(conn, file_row["id"]) if file_row else 1.0
+                    mem_score = (base / (1 + rank * 0.15) + 0.08) * weight
                     if r["chunk_id"] in existing_map:
                         # Re-score existing memory if boosted score is higher
                         existing = existing_map[r["chunk_id"]]
@@ -381,6 +411,21 @@ def hybrid_search(
                         r["score"] = mem_score
                         deduped.append(r)
                 deduped.sort(key=lambda r: r.get("score", 0.0), reverse=True)
+
+    # Track hits for returned memories
+    mem_file_ids = set()
+    for r in deduped[:top_k]:
+        if r["file_path"].startswith("memory://"):
+            frow = conn.execute("SELECT id FROM files WHERE file_path = ?", (r["file_path"],)).fetchone()
+            if frow:
+                mem_file_ids.add(frow["id"])
+    if mem_file_ids:
+        placeholders = ",".join("?" * len(mem_file_ids))
+        sql = (
+            "UPDATE memory_meta SET hit_count = hit_count + 1,"
+            f" last_hit_at = CURRENT_TIMESTAMP WHERE file_id IN ({placeholders})"
+        )
+        conn.execute(sql, list(mem_file_ids))
 
     # Log query for promotion analysis
     top_score = deduped[0]["score"] if deduped else 0.0
