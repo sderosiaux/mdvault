@@ -1,6 +1,8 @@
-import pytest
-import numpy as np
 from pathlib import Path
+
+import numpy as np
+import pytest
+
 from mdvault.db import init_db
 
 FIXTURES_DIR = Path(__file__).parent / "fixtures"
@@ -17,6 +19,7 @@ def db_path(tmp_path):
 @pytest.fixture
 def mock_embedder():
     """Deterministic fake embedder -- hash-based, 256-dim, no model download."""
+
     def embed(texts: list[str]) -> np.ndarray:
         result = []
         for text in texts:
@@ -26,4 +29,5 @@ def mock_embedder():
             vec /= np.linalg.norm(vec)
             result.append(vec)
         return np.array(result, dtype=np.float32)
+
     return embed

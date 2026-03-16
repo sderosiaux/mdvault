@@ -1,18 +1,18 @@
 import os
 from pathlib import Path
-from typing import Optional
 
-import typer
 import platformdirs
+import typer
 
 from mdvault.db import get_connection, init_db
-from mdvault.indexer import index_directory, incremental_index
-from mdvault.retriever import hybrid_search, get_total_chunks, related_notes as _related_notes
+from mdvault.indexer import incremental_index, index_directory
+from mdvault.retriever import get_total_chunks, hybrid_search
+from mdvault.retriever import related_notes as _related_notes
 
 app = typer.Typer(add_completion=False)
 
 
-def _resolve_db(db: Optional[str] = None) -> Path:
+def _resolve_db(db: str | None = None) -> Path:
     """Resolve DB path: --db flag > VAULT_DB env > platformdirs default."""
     if db:
         return Path(db)
@@ -39,7 +39,7 @@ def _get_embedder():
 @app.command()
 def index(
     vault_path: str = typer.Argument(..., help="Path to markdown vault directory"),
-    db: Optional[str] = typer.Option(None, "--db", help="Path to database file"),
+    db: str | None = typer.Option(None, "--db", help="Path to database file"),
     incremental: bool = typer.Option(False, "--incremental", help="Incremental index"),
 ):
     """Index a directory of markdown files."""
@@ -53,7 +53,7 @@ def index(
     if incremental:
         incremental_index(conn, vault_root, embedder)
         conn.commit()
-        typer.echo(f"Incremental index complete.")
+        typer.echo("Incremental index complete.")
     else:
         index_directory(conn, vault_root, embedder, full=True)
         conn.commit()
@@ -68,7 +68,7 @@ def index(
 @app.command()
 def search(
     query: str = typer.Argument(..., help="Search query"),
-    db: Optional[str] = typer.Option(None, "--db", help="Path to database file"),
+    db: str | None = typer.Option(None, "--db", help="Path to database file"),
     top_k: int = typer.Option(5, "--top-k", help="Number of results to return"),
     expand: bool = typer.Option(False, "--expand", help="Expand query via local LLM (requires Ollama)"),
     expand_model: str = typer.Option("qwen3:0.6b", "--expand-model", help="Ollama model for query expansion"),
@@ -90,9 +90,7 @@ def search(
     typer.echo("")
 
     for i, r in enumerate(results, start=1):
-        typer.echo(
-            f"[{i}] {r['file_path']} (chunk {r['chunk_idx']}) — score {r['score']:.3f}"
-        )
+        typer.echo(f"[{i}] {r['file_path']} (chunk {r['chunk_idx']}) — score {r['score']:.3f}")
         typer.echo("─" * 42)
         content_preview = r["raw_content"][:500]
         typer.echo(content_preview)
@@ -102,7 +100,7 @@ def search(
 
 @app.command()
 def stats(
-    db: Optional[str] = typer.Option(None, "--db", help="Path to database file"),
+    db: str | None = typer.Option(None, "--db", help="Path to database file"),
 ):
     """Show index statistics."""
     db_path = _resolve_db(db)
@@ -111,9 +109,7 @@ def stats(
         raise typer.Exit(1)
 
     conn = get_connection(db_path)
-    vault_root = conn.execute(
-        "SELECT value FROM vault_config WHERE key = 'vault_root'"
-    ).fetchone()
+    vault_root = conn.execute("SELECT value FROM vault_config WHERE key = 'vault_root'").fetchone()
     file_count = conn.execute("SELECT COUNT(*) as c FROM files").fetchone()["c"]
     chunk_count = get_total_chunks(conn)
     conn.close()
@@ -134,7 +130,7 @@ def stats(
 @app.command()
 def related(
     file_path: str = typer.Argument(..., help="Relative path of the file in the vault"),
-    db: Optional[str] = typer.Option(None, "--db", help="Path to database file"),
+    db: str | None = typer.Option(None, "--db", help="Path to database file"),
     top_k: int = typer.Option(5, "--top-k", help="Number of similar files to return"),
 ):
     """Show related notes: links, backlinks, and semantically similar files."""
@@ -179,7 +175,7 @@ def related(
 
 @app.command()
 def serve(
-    db: Optional[str] = typer.Option(None, "--db", help="Path to database file"),
+    db: str | None = typer.Option(None, "--db", help="Path to database file"),
 ):
     """Start the MCP server for Claude Code integration."""
     db_path = _resolve_db(db)

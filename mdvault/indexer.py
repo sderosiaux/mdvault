@@ -2,9 +2,9 @@ import hashlib
 import posixpath
 import re
 import sqlite3
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Callable
 
 import numpy as np
 
@@ -46,7 +46,7 @@ def chunk_file(content: str) -> list[Chunk]:
     preamble = parts[0].strip()
     if preamble:
         preamble_lines = preamble.split("\n")
-        non_title_lines = [l for l in preamble_lines if not l.startswith("# ")]
+        non_title_lines = [line for line in preamble_lines if not line.startswith("# ")]
         preamble_text = "\n".join(non_title_lines).strip()
         if preamble_text and len(preamble_text.split()) >= 20:
             blocks.append((preamble_text, None))
@@ -69,8 +69,7 @@ def chunk_file(content: str) -> list[Chunk]:
     final_chunks: list[tuple[str, str | None]] = []
     for text, heading in blocks:
         sub_chunks = _split_oversized(text, max_words=400)
-        for sc in sub_chunks:
-            final_chunks.append((sc, heading))
+        final_chunks.extend((sc, heading) for sc in sub_chunks)
 
     # Merge tiny chunks (<20 words) into previous
     merged: list[tuple[str, str | None]] = []
@@ -144,10 +143,7 @@ def _split_oversized(block: str, max_words: int = 400) -> list[str]:
 def _hard_split(text: str, max_words: int = 400) -> list[str]:
     """Hard-split text at word boundaries."""
     words = text.split()
-    chunks = []
-    for i in range(0, len(words), max_words):
-        chunks.append(" ".join(words[i : i + max_words]))
-    return chunks
+    return [" ".join(words[i : i + max_words]) for i in range(0, len(words), max_words)]
 
 
 def compute_sha256(file_path: Path) -> str:
@@ -235,11 +231,9 @@ def index_file(
             "INSERT INTO files (file_path, file_hash) VALUES (?, ?)",
             (rel_path, file_hash),
         )
-        file_id = conn.execute(
-            "SELECT id FROM files WHERE file_path = ?", (rel_path,)
-        ).fetchone()["id"]
+        file_id = conn.execute("SELECT id FROM files WHERE file_path = ?", (rel_path,)).fetchone()["id"]
 
-        for idx, (chunk, ctx_text, embedding) in enumerate(zip(chunks, ctx_texts, embeddings)):
+        for idx, (chunk, ctx_text, embedding) in enumerate(zip(chunks, ctx_texts, embeddings, strict=True)):
             cursor = conn.execute(
                 "INSERT INTO chunks (file_id, chunk_idx, content, raw_content) VALUES (?, ?, ?, ?)",
                 (file_id, idx, ctx_text, chunk.content),
@@ -325,8 +319,7 @@ def incremental_index(
 
     # Get DB state
     db_files = {
-        row["file_path"]: row["file_hash"]
-        for row in conn.execute("SELECT file_path, file_hash FROM files").fetchall()
+        row["file_path"]: row["file_hash"] for row in conn.execute("SELECT file_path, file_hash FROM files").fetchall()
     }
     db_paths = set(db_files.keys())
 

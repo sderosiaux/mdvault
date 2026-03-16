@@ -42,7 +42,59 @@ mdvault = "mdvault.cli:app"
 dev = [
     "pytest",
     "pytest-asyncio",
+    "ruff",
+    "pre-commit",
 ]
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
+
+[tool.ruff]
+target-version = "py311"
+line-length = 120
+
+[tool.ruff.lint]
+select = [
+    "E",     # pycodestyle errors
+    "W",     # pycodestyle warnings
+    "F",     # pyflakes
+    "I",     # isort
+    "N",     # pep8-naming
+    "UP",    # pyupgrade
+    "B",     # flake8-bugbear
+    "SIM",   # flake8-simplify
+    "T20",   # flake8-print (catch stray prints)
+    "RUF",   # ruff-specific
+    "S",     # flake8-bandit (security)
+    "PTH",   # flake8-use-pathlib (prefer pathlib over os.path)
+    "PLC",   # pylint conventions
+    "PLE",   # pylint errors
+    "PLW",   # pylint warnings
+    "PIE",   # flake8-pie (misc bad practices)
+    "C4",    # flake8-comprehensions
+    "ISC",   # implicit string concat
+    "G",     # flake8-logging-format
+    "INP",   # flake8-no-pep420 (implicit namespace packages)
+    "TID",   # flake8-tidy-imports (ban relative imports, etc.)
+    "TCH",   # flake8-type-checking (move type-only imports behind TYPE_CHECKING)
+    "PERF",  # perflint (performance anti-patterns)
+]
+ignore = [
+    "T201",    # allow print() in CLI
+    "S603",    # subprocess calls — not relevant here
+    "S607",    # partial executable path — not relevant here
+    "INP001",  # implicit namespace — tests dir is fine
+    "PLC0415", # lazy imports are intentional (heavy deps like model2vec)
+    "S608",    # SQL "injection" via parameterized placeholders — false positive
+    "S310",    # urlopen on hardcoded localhost — safe
+    "SIM108",  # ternary for if/else assignment — less readable here
+]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/*" = ["B011", "S101"]  # assert is fine in tests
+
+[tool.ruff.lint.flake8-bandit]
+check-typed-exception = true
+
+[tool.ruff.lint.flake8-tidy-imports]
+ban-relative-imports = "all"

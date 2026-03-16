@@ -2,12 +2,12 @@ import functools
 import os
 from pathlib import Path
 
+import platformdirs
 from mcp.server.fastmcp import FastMCP
 
-import platformdirs
-
 from mdvault.db import get_connection
-from mdvault.retriever import hybrid_search, get_total_chunks, related_notes as _related_notes
+from mdvault.retriever import get_total_chunks, hybrid_search
+from mdvault.retriever import related_notes as _related_notes
 
 mcp_app = FastMCP("mdvault")
 
@@ -37,7 +37,12 @@ def search_vault(query: str, top_k: int = 5, expand: bool = False) -> dict:
     Set expand=True to use local LLM (Ollama) for query expansion."""
     db_path = _resolve_db()
     if not db_path.exists():
-        return {"error": "Database not found. Run 'mdvault index' first.", "results": [], "query": query, "total_chunks": 0}
+        return {
+            "error": "Database not found. Run 'mdvault index' first.",
+            "results": [],
+            "query": query,
+            "total_chunks": 0,
+        }
     embedder = _get_embedder()
     conn = get_connection(db_path)
     total = get_total_chunks(conn)
@@ -64,7 +69,13 @@ def related_notes(file_path: str, top_k: int = 5) -> dict:
     """Find related notes: direct links, backlinks, and semantically similar files."""
     db_path = _resolve_db()
     if not db_path.exists():
-        return {"error": "Database not found. Run 'mdvault index' first.", "file_path": file_path, "links": [], "backlinks": [], "similar": []}
+        return {
+            "error": "Database not found. Run 'mdvault index' first.",
+            "file_path": file_path,
+            "links": [],
+            "backlinks": [],
+            "similar": [],
+        }
     embedder = _get_embedder()
     conn = get_connection(db_path)
     result = _related_notes(conn, file_path, embedder, top_k=top_k)

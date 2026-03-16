@@ -1,21 +1,19 @@
 import hashlib
-import shutil
-import pytest
-from pathlib import Path
+
 from mdvault.db import get_connection, init_db
 from mdvault.indexer import (
     Chunk,
+    _extract_links,
     chunk_file,
     compute_sha256,
-    index_file,
-    index_directory,
     incremental_index,
-    _extract_links,
+    index_directory,
+    index_file,
 )
 from tests.conftest import FIXTURES_DIR
 
-
 # ---------- chunk_file tests ----------
+
 
 def test_chunk_file_by_headings():
     """File with 3 ## sections -> 3 Chunk objects, each contains its heading."""
@@ -86,6 +84,7 @@ def test_chunk_minimum_20_words():
 
 # ---------- compute_sha256 ----------
 
+
 def test_sha256_file(tmp_path):
     """Returns hex SHA256 of file content."""
     f = tmp_path / "test.md"
@@ -96,6 +95,7 @@ def test_sha256_file(tmp_path):
 
 # ---------- index_file ----------
 
+
 def test_index_file_inserts_rows(db_path, mock_embedder):
     """After indexing one file: 1 row in files, N rows in chunks, same N in fts and vec."""
     nginx_path = FIXTURES_DIR / "infra" / "nginx.md"
@@ -105,9 +105,7 @@ def test_index_file_inserts_rows(db_path, mock_embedder):
 
     file_count = conn.execute("SELECT COUNT(*) as c FROM files").fetchone()["c"]
     chunk_count = conn.execute("SELECT COUNT(*) as c FROM chunks").fetchone()["c"]
-    fts_count = conn.execute(
-        "SELECT COUNT(*) as c FROM chunks_fts"
-    ).fetchone()["c"]
+    fts_count = conn.execute("SELECT COUNT(*) as c FROM chunks_fts").fetchone()["c"]
     vec_count = conn.execute("SELECT COUNT(*) as c FROM chunks_vec").fetchone()["c"]
     conn.close()
 
@@ -140,9 +138,7 @@ def test_index_file_fts_searchable_via_context(db_path, mock_embedder):
     conn.commit()
 
     # Search by path component — wouldn't work without context prefix
-    rows = conn.execute(
-        "SELECT * FROM chunks_fts WHERE chunks_fts MATCH 'nginx'"
-    ).fetchall()
+    rows = conn.execute("SELECT * FROM chunks_fts WHERE chunks_fts MATCH 'nginx'").fetchall()
     conn.close()
     assert len(rows) > 0
 
@@ -154,14 +150,13 @@ def test_index_file_fts_searchable(db_path, mock_embedder):
     index_file(conn, nginx_path, FIXTURES_DIR, mock_embedder)
     conn.commit()
 
-    rows = conn.execute(
-        "SELECT * FROM chunks_fts WHERE chunks_fts MATCH 'reverse proxy'"
-    ).fetchall()
+    rows = conn.execute("SELECT * FROM chunks_fts WHERE chunks_fts MATCH 'reverse proxy'").fetchall()
     conn.close()
     assert len(rows) > 0
 
 
 # ---------- index_directory ----------
+
 
 def test_index_directory_indexes_all_md_files(db_path, mock_embedder):
     """Indexing fixtures/ creates rows for all .md files."""
@@ -193,12 +188,13 @@ def test_full_reindex_wipes_and_rebuilds(db_path, mock_embedder):
 
 # ---------- incremental_index ----------
 
+
 def test_incremental_skip_unchanged_file(tmp_path, mock_embedder):
     """Index -> re-run incremental -> same hash -> file not reindexed (indexed_at unchanged)."""
     vault = tmp_path / "vault"
     vault.mkdir()
     f = vault / "note.md"
-    f.write_text("## Hello\n\nThis is a test note with enough words to pass the minimum chunk size requirement easily.\n")
+    f.write_text("## Hello\n\nThis is a test note with enough words to pass the chunk size requirement.\n")
 
     db_p = tmp_path / "test.db"
     init_db(db_p, vault_root=str(vault))
@@ -222,7 +218,7 @@ def test_incremental_reindex_modified_file(tmp_path, mock_embedder):
     vault = tmp_path / "vault"
     vault.mkdir()
     f = vault / "note.md"
-    f.write_text("## Original\n\nOriginal content that is long enough to form a valid chunk for indexing purposes here.\n")
+    f.write_text("## Original\n\nOriginal content long enough to form a valid chunk for indexing.\n")
 
     db_p = tmp_path / "test.db"
     init_db(db_p, vault_root=str(vault))
@@ -233,7 +229,7 @@ def test_incremental_reindex_modified_file(tmp_path, mock_embedder):
     old_content = conn.execute("SELECT raw_content FROM chunks LIMIT 1").fetchone()["raw_content"]
 
     # Modify file
-    f.write_text("## Modified\n\nModified content that is long enough to form a valid chunk for indexing purposes here.\n")
+    f.write_text("## Modified\n\nModified content long enough to form a valid chunk for indexing.\n")
 
     incremental_index(conn, vault, mock_embedder)
     conn.commit()
@@ -296,7 +292,7 @@ def test_batch_processing_large_vault(tmp_path, mock_embedder):
     vault.mkdir()
     for i in range(150):
         (vault / f"note_{i:03d}.md").write_text(
-            f"## Note {i}\n\nThis is note number {i} with enough content words to satisfy the minimum chunk size requirement.\n"
+            f"## Note {i}\n\nThis is note {i} with enough content to satisfy the chunk size requirement.\n"
         )
 
     db_p = tmp_path / "test.db"
@@ -311,6 +307,7 @@ def test_batch_processing_large_vault(tmp_path, mock_embedder):
 
 
 # ---------- _extract_links tests ----------
+
 
 def test_extract_links_standard_markdown():
     """Parses [text](path.md) links, resolves relative to source."""
@@ -374,11 +371,7 @@ def test_extract_links_ignores_image_links():
 
 def test_extract_links_ignores_code_blocks():
     """Links inside fenced code blocks and inline code are skipped."""
-    content = (
-        "Real [link](real.md) here.\n\n"
-        "```markdown\n[fake](fake.md)\n```\n\n"
-        "And `[inline](inline.md)` code."
-    )
+    content = "Real [link](real.md) here.\n\n```markdown\n[fake](fake.md)\n```\n\nAnd `[inline](inline.md)` code."
     links = _extract_links(content, "index.md")
     assert "real.md" in links
     assert "fake.md" not in links
@@ -401,6 +394,7 @@ def test_extract_links_ignores_ftp_file_protocols():
 
 # ---------- links table integration ----------
 
+
 def test_index_file_stores_links(tmp_path, mock_embedder):
     """Links extracted from markdown are stored in the links table."""
     vault = tmp_path / "vault"
@@ -408,12 +402,8 @@ def test_index_file_stores_links(tmp_path, mock_embedder):
     (vault / "a.md").write_text(
         "# Note A\n\n## Content\n\nSee [B](b.md) and [[c]] for reference with enough words here.\n"
     )
-    (vault / "b.md").write_text(
-        "# Note B\n\n## Content\n\nThis is note B with enough words to form a valid chunk.\n"
-    )
-    (vault / "c.md").write_text(
-        "# Note C\n\n## Content\n\nThis is note C with enough words to form a valid chunk.\n"
-    )
+    (vault / "b.md").write_text("# Note B\n\n## Content\n\nThis is note B with enough words to form a valid chunk.\n")
+    (vault / "c.md").write_text("# Note C\n\n## Content\n\nThis is note C with enough words to form a valid chunk.\n")
 
     db_p = tmp_path / "test.db"
     init_db(db_p, vault_root=str(vault))
@@ -436,12 +426,8 @@ def test_links_removed_on_file_delete(tmp_path, mock_embedder):
     """When a file is deleted (incremental), its links are cascade-deleted."""
     vault = tmp_path / "vault"
     vault.mkdir()
-    (vault / "a.md").write_text(
-        "# Note A\n\n## Links\n\nSee [B](b.md) for reference with enough words to chunk.\n"
-    )
-    (vault / "b.md").write_text(
-        "# Note B\n\n## Content\n\nEnough words to form a valid chunk for indexing purposes.\n"
-    )
+    (vault / "a.md").write_text("# Note A\n\n## Links\n\nSee [B](b.md) for reference with enough words to chunk.\n")
+    (vault / "b.md").write_text("# Note B\n\n## Content\n\nEnough words to form a valid chunk for indexing purposes.\n")
 
     db_p = tmp_path / "test.db"
     init_db(db_p, vault_root=str(vault))

@@ -3,7 +3,7 @@ import posixpath
 import sqlite3
 import urllib.error
 import urllib.request
-from typing import Callable
+from collections.abc import Callable
 
 import numpy as np
 
@@ -84,14 +84,16 @@ def vector_search(
     for row in rows:
         d = detail_map.get(row["chunk_id"])
         if d:
-            results.append({
-                "chunk_id": row["chunk_id"],
-                "file_path": d["file_path"],
-                "chunk_idx": d["chunk_idx"],
-                "content": d["content"],
-                "raw_content": d["raw_content"],
-                "distance": row["distance"],
-            })
+            results.append(
+                {
+                    "chunk_id": row["chunk_id"],
+                    "file_path": d["file_path"],
+                    "chunk_idx": d["chunk_idx"],
+                    "content": d["content"],
+                    "raw_content": d["raw_content"],
+                    "distance": row["distance"],
+                }
+            )
     return results
 
 
@@ -139,12 +141,14 @@ def expand_query_llm(query: str, model: str = "qwen3:0.6b") -> str | None:
         f"document might contain. Do not explain, just write the paragraph.\n\n"
         f"Query: {query}\n\nParagraph:"
     )
-    payload = json.dumps({
-        "model": model,
-        "prompt": prompt,
-        "stream": False,
-        "options": {"temperature": 0.3, "num_predict": 100},
-    }).encode()
+    payload = json.dumps(
+        {
+            "model": model,
+            "prompt": prompt,
+            "stream": False,
+            "options": {"temperature": 0.3, "num_predict": 100},
+        }
+    ).encode()
 
     req = urllib.request.Request(
         "http://localhost:11434/api/generate",

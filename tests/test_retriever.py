@@ -1,16 +1,17 @@
+from unittest.mock import patch
+
 import pytest
-import numpy as np
+
 from mdvault.db import get_connection, init_db
 from mdvault.indexer import index_directory
-from unittest.mock import patch
 from mdvault.retriever import (
     bm25_search,
-    vector_search,
-    rrf_fusion,
-    hybrid_search,
     expand_query_llm,
     get_total_chunks,
+    hybrid_search,
     related_notes,
+    rrf_fusion,
+    vector_search,
 )
 from tests.conftest import FIXTURES_DIR
 
@@ -26,6 +27,7 @@ def indexed_db(db_path, mock_embedder):
 
 
 # ---------- bm25_search ----------
+
 
 def test_bm25_search_returns_ranked_results(indexed_db):
     """After indexing, bm25_search('nginx') returns results containing nginx.md chunks."""
@@ -56,6 +58,7 @@ def test_bm25_search_empty_vault_returns_empty(db_path):
 
 # ---------- vector_search ----------
 
+
 def test_vector_search_returns_ranked_results(indexed_db, mock_embedder):
     """vector_search(query_vec, top_k=5) returns 5 results ordered by distance."""
     query_vec = mock_embedder(["nginx reverse proxy"])[0]
@@ -69,6 +72,7 @@ def test_vector_search_returns_ranked_results(indexed_db, mock_embedder):
 
 
 # ---------- rrf_fusion ----------
+
 
 def test_rrf_fusion_combines_both_lists():
     """A result in both lists scores higher than one in only one list."""
@@ -111,6 +115,7 @@ def test_rrf_fusion_chunk_in_only_vec():
 
 
 # ---------- hybrid_search ----------
+
 
 def test_hybrid_search_end_to_end(indexed_db, mock_embedder):
     """hybrid_search returns results with file_path, chunk_idx, content, score."""
@@ -160,6 +165,7 @@ def test_rrf_k_parameter():
 
 # ---------- get_total_chunks ----------
 
+
 def test_total_chunks_count(indexed_db):
     """get_total_chunks returns correct count."""
     conn = get_connection(indexed_db)
@@ -173,6 +179,7 @@ def test_total_chunks_count(indexed_db):
 # ---------- related_notes ----------
 
 # ---------- expand_query_llm ----------
+
 
 def test_expand_query_llm_returns_none_when_ollama_unavailable():
     """When Ollama is not running, expand_query_llm returns None gracefully."""
@@ -200,16 +207,13 @@ def test_hybrid_search_with_mock_expansion(indexed_db, mock_embedder):
 
 # ---------- related_notes ----------
 
+
 def test_related_notes_returns_structure(tmp_path, mock_embedder):
     """related_notes returns dict with links, backlinks, similar."""
     vault = tmp_path / "vault"
     vault.mkdir()
-    (vault / "a.md").write_text(
-        "# A\n\n## Content\n\nSee [B](b.md) for details with enough words to chunk properly.\n"
-    )
-    (vault / "b.md").write_text(
-        "# B\n\n## Content\n\nNote B references [[a]] with enough words to chunk properly.\n"
-    )
+    (vault / "a.md").write_text("# A\n\n## Content\n\nSee [B](b.md) for details with enough words to chunk properly.\n")
+    (vault / "b.md").write_text("# B\n\n## Content\n\nNote B references [[a]] with enough words to chunk properly.\n")
     (vault / "c.md").write_text(
         "# C\n\n## Content\n\nUnrelated note C with enough words to chunk properly for indexing.\n"
     )
@@ -224,8 +228,8 @@ def test_related_notes_returns_structure(tmp_path, mock_embedder):
     conn.close()
 
     assert result["file_path"] == "a.md"
-    assert "b.md" in result["links"]          # a links to b
-    assert "b.md" in result["backlinks"]       # b wikilinks to a
+    assert "b.md" in result["links"]  # a links to b
+    assert "b.md" in result["backlinks"]  # b wikilinks to a
     assert isinstance(result["similar"], list)
 
 
@@ -234,12 +238,8 @@ def test_related_notes_backlinks_by_filename(tmp_path, mock_embedder):
     vault = tmp_path / "vault"
     sub = vault / "sub"
     sub.mkdir(parents=True)
-    (sub / "deep.md").write_text(
-        "# Deep\n\n## Content\n\nEnough words to chunk. See [[top]] for parent reference.\n"
-    )
-    (vault / "top.md").write_text(
-        "# Top\n\n## Content\n\nTop level note with enough words to form a valid chunk.\n"
-    )
+    (sub / "deep.md").write_text("# Deep\n\n## Content\n\nEnough words to chunk. See [[top]] for parent reference.\n")
+    (vault / "top.md").write_text("# Top\n\n## Content\n\nTop level note with enough words to form a valid chunk.\n")
 
     db_p = tmp_path / "test.db"
     init_db(db_p, vault_root=str(vault))

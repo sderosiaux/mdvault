@@ -1,4 +1,5 @@
 from typer.testing import CliRunner
+
 from mdvault.cli import app
 from tests.conftest import FIXTURES_DIR
 
@@ -21,9 +22,7 @@ def test_index_incremental_flag(tmp_path):
     result = runner.invoke(app, ["index", str(FIXTURES_DIR), "--db", str(db_file)])
     assert result.exit_code == 0, result.output
     # Then incremental
-    result = runner.invoke(
-        app, ["index", str(FIXTURES_DIR), "--db", str(db_file), "--incremental"]
-    )
+    result = runner.invoke(app, ["index", str(FIXTURES_DIR), "--db", str(db_file), "--incremental"])
     assert result.exit_code == 0, result.output
 
 
@@ -58,9 +57,7 @@ def test_search_top_k_flag(tmp_path):
     """--top-k 3 returns 3 results."""
     db_file = tmp_path / "vault.db"
     runner.invoke(app, ["index", str(FIXTURES_DIR), "--db", str(db_file)])
-    result = runner.invoke(
-        app, ["search", "nginx", "--db", str(db_file), "--top-k", "3"]
-    )
+    result = runner.invoke(app, ["search", "nginx", "--db", str(db_file), "--top-k", "3"])
     assert result.exit_code == 0, result.output
     # Count result markers [1], [2], [3]
     result_count = result.output.count("[")
@@ -72,12 +69,8 @@ def test_related_command(tmp_path):
     db_file = tmp_path / "vault.db"
     vault = tmp_path / "vault"
     vault.mkdir()
-    (vault / "a.md").write_text(
-        "# A\n\n## Content\n\nSee [B](b.md) for reference with enough words to chunk.\n"
-    )
-    (vault / "b.md").write_text(
-        "# B\n\n## Content\n\nNote B with enough words to form a valid chunk for indexing.\n"
-    )
+    (vault / "a.md").write_text("# A\n\n## Content\n\nSee [B](b.md) for reference with enough words to chunk.\n")
+    (vault / "b.md").write_text("# B\n\n## Content\n\nNote B with enough words to form a valid chunk for indexing.\n")
     runner.invoke(app, ["index", str(vault), "--db", str(db_file)])
     result = runner.invoke(app, ["related", "a.md", "--db", str(db_file)])
     assert result.exit_code == 0, result.output
