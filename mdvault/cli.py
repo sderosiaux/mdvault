@@ -197,10 +197,17 @@ def search(
             else:
                 preview = ""
                 for line in r["raw_content"].splitlines():
-                    stripped = line.strip().lstrip("#").strip()
-                    if stripped:
+                    stripped = line.strip().lstrip("#").strip().strip("-").strip("*").strip()
+                    if len(stripped) >= 10:
                         preview = stripped[:120]
                         break
+                if not preview:
+                    # Fallback: first non-empty line
+                    for line in r["raw_content"].splitlines():
+                        stripped = line.strip()
+                        if stripped:
+                            preview = stripped[:120]
+                            break
                 typer.echo(f"[{i}] {r['score']:.3f}  {r['file_path']}:{r['chunk_idx']}")
                 typer.echo(f"  {preview}")
                 typer.echo("")
