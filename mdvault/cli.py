@@ -1,6 +1,8 @@
+import contextlib
 import json as _json
 import os
 import sqlite3
+from datetime import UTC
 from pathlib import Path
 
 import platformdirs
@@ -270,23 +272,41 @@ def stats(
         vaults.append({"name": name, "path": path, "files": v_files, "chunks": v_chunks})
 
     mem_count = conn.execute("SELECT COUNT(*) as c FROM files WHERE file_path LIKE 'memory://%'").fetchone()["c"]
+
+    # Extra stats — wrapped for backward compat with older DBs
+    query_count = cluster_count = gap_count = 0
+    src_counts: list[sqlite3.Row] = []
+    with contextlib.suppress(sqlite3.OperationalError):
+        query_count = conn.execute(
+            "SELECT COUNT(*) as c FROM query_log WHERE created_at > datetime('now', '-30 days')"
+        ).fetchone()["c"]
+    with contextlib.suppress(sqlite3.OperationalError):
+        cluster_count = conn.execute("SELECT COUNT(*) as c FROM query_clusters").fetchone()["c"]
+    with contextlib.suppress(sqlite3.OperationalError):
+        gap_count = conn.execute("SELECT COUNT(*) as c FROM files WHERE file_path LIKE 'memory://gaps/%'").fetchone()[
+            "c"
+        ]
+    with contextlib.suppress(sqlite3.OperationalError):
+        src_counts = conn.execute("SELECT source, COUNT(*) as c FROM memory_meta GROUP BY source").fetchall()
+
     conn.close()
 
     db_size = db_path.stat().st_size
 
     if json:
-        typer.echo(
-            _json.dumps(
-                {
-                    "db_path": str(db_path),
-                    "db_size_bytes": db_size,
-                    "total_files": file_count,
-                    "total_chunks": chunk_count,
-                    "memories": mem_count,
-                    "vaults": vaults,
-                }
-            )
-        )
+        data = {
+            "db_path": str(db_path),
+            "db_size_bytes": db_size,
+            "total_files": file_count,
+            "total_chunks": chunk_count,
+            "memories": mem_count,
+            "memory_by_source": {r["source"]: r["c"] for r in src_counts},
+            "queries_30d": query_count,
+            "query_clusters": cluster_count,
+            "knowledge_gaps": gap_count,
+            "vaults": vaults,
+        }
+        typer.echo(_json.dumps(data))
     else:
         if vaults:
             for v in vaults:
@@ -294,7 +314,17 @@ def stats(
         else:
             typer.echo("Vault         : (none)")
         if mem_count:
-            typer.echo(f"Memories      : {mem_count}")
+            if src_counts:
+                parts = ", ".join(f"{r['c']} {r['source']}" for r in src_counts)
+                typer.echo(f"Memories      : {mem_count} ({parts})")
+            else:
+                typer.echo(f"Memories      : {mem_count}")
+        if query_count:
+            typer.echo(f"Queries (30d) : {query_count}")
+        if cluster_count:
+            typer.echo(f"Query clusters: {cluster_count}")
+        if gap_count:
+            typer.echo(f"Knowledge gaps: {gap_count}")
         typer.echo(f"DB path       : {db_path}")
         typer.echo(f"Files indexed : {file_count:,}")
         typer.echo(f"Total chunks  : {chunk_count:,}")
@@ -395,6 +425,20 @@ def forget(
         typer.echo(f"Deleted {count} memories")
 
 
+def _last_hit_display(last_hit_at: str | None) -> str:
+    if not last_hit_at:
+        return "never"
+    from datetime import datetime
+
+    dt = datetime.fromisoformat(last_hit_at)
+    days = (datetime.now(tz=UTC) - dt.replace(tzinfo=UTC)).days
+    if days == 0:
+        return "today"
+    if days == 1:
+        return "1d ago"
+    return f"{days}d ago"
+
+
 @app.command()
 def memories(
     db: str | None = typer.Option(None, "--db", help="Path to database file"),
@@ -408,7 +452,9 @@ def memories(
 
     sql = (
         "SELECT f.file_path, mm.namespace, mm.source, mm.created_at,"
-        " (SELECT COUNT(*) FROM chunks c WHERE c.file_id = f.id) as chunk_count"
+        " mm.confidence, mm.hit_count, mm.last_hit_at,"
+        " (SELECT COUNT(*) FROM chunks c WHERE c.file_id = f.id)"
+        " as chunk_count"
         " FROM memory_meta mm"
         " JOIN files f ON f.id = mm.file_id"
     )
@@ -430,6 +476,9 @@ def memories(
                 "file_path": path,
                 "namespace": row["namespace"] or "",
                 "source": row["source"],
+                "confidence": row["confidence"],
+                "hit_count": row["hit_count"],
+                "last_hit_at": row["last_hit_at"],
                 "chunks": row["chunk_count"],
                 "created_at": row["created_at"],
             }
@@ -445,7 +494,72 @@ def memories(
         typer.echo("")
         for m in items:
             ns = m["namespace"] or "(none)"
-            typer.echo(f"  {m['id']}  ns={ns}  src={m['source']}  chunks={m['chunks']}  {m['created_at']}")
+            last = _last_hit_display(m.get("last_hit_at"))
+            typer.echo(
+                f"  {m['id']}  ns={ns}  src={m['source']}"
+                f"  conf={m['confidence']:.2f}  hits={m['hit_count']}"
+                f"  last={last}  {m['chunks']} chunks"
+            )
+
+
+@app.command()
+def gaps(
+    db: str | None = typer.Option(None, "--db", help="Path to database file"),
+    json: bool = typer.Option(
+        False,
+        "--json",
+        "-j",
+        help="Output JSON",
+    ),
+):
+    """Show knowledge gaps -- topics frequently searched with poor results."""
+    db_path = _resolve_db(db)
+    _require_db(db_path)
+    conn = get_connection(db_path)
+
+    try:
+        rows = conn.execute(
+            """SELECT f.file_path, c.raw_content, mm.metadata,
+                mm.created_at, qc.query_count, qc.avg_score
+            FROM memory_meta mm
+            JOIN files f ON f.id = mm.file_id
+            JOIN chunks c ON c.file_id = f.id AND c.chunk_idx = 0
+            LEFT JOIN query_clusters qc
+                ON qc.id = CAST(
+                    json_extract(mm.metadata, '$.cluster_id') AS INTEGER
+                )
+            WHERE mm.namespace = 'gaps'
+            ORDER BY qc.query_count DESC"""
+        ).fetchall()
+    except sqlite3.OperationalError:
+        rows = []
+    conn.close()
+
+    if json:
+        items = [
+            {
+                "id": row["file_path"].rsplit("/", 1)[-1],
+                "query": _json.loads(row["metadata"]).get("from_query", ""),
+                "query_count": row["query_count"],
+                "avg_score": row["avg_score"],
+                "created_at": row["created_at"],
+            }
+            for row in rows
+        ]
+        typer.echo(_json.dumps(items))
+    else:
+        if not rows:
+            typer.echo("No knowledge gaps detected.")
+            return
+        typer.echo(f"Knowledge gaps: {len(rows)}")
+        typer.echo("")
+        for row in rows:
+            mid = row["file_path"].rsplit("/", 1)[-1]
+            meta = _json.loads(row["metadata"])
+            query = meta.get("from_query", "unknown")
+            qc = row["query_count"] or "?"
+            score = f"{row['avg_score']:.2f}" if row["avg_score"] else "?"
+            typer.echo(f'  {mid}  "{query}"  (queried {qc} times, best score {score})')
 
 
 @app.command()
