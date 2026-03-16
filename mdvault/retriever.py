@@ -14,6 +14,8 @@ def bm25_search(
     conn: sqlite3.Connection,
     query: str,
     top_k: int = 50,
+    source: str | None = None,
+    namespace: str | None = None,
 ) -> list[dict]:
     """FTS5 BM25 search. Returns ranked results (best first)."""
     # Build FTS5 query: bigrams (boosted via NEAR) + unigrams for partial matches
@@ -27,9 +29,20 @@ def bm25_search(
         parts.insert(0, focused)
     fts_query = " OR ".join(parts) if parts else query
 
+    source_clause = ""
+    params: list = [fts_query]
+    if source == "memories":
+        source_clause += " AND f.file_path LIKE 'memory://%'"
+    elif source == "files":
+        source_clause += " AND f.file_path NOT LIKE 'memory://%'"
+    if namespace is not None:
+        source_clause += " AND f.file_path LIKE ?"
+        params.append(f"memory://{namespace}/%")
+    params.append(top_k)
+
     try:
         rows = conn.execute(
-            """
+            f"""
             SELECT
                 c.id AS chunk_id,
                 f.file_path,
@@ -40,11 +53,11 @@ def bm25_search(
             FROM chunks_fts fts
             JOIN chunks c ON c.id = fts.rowid
             JOIN files f ON f.id = c.file_id
-            WHERE chunks_fts MATCH ?
+            WHERE chunks_fts MATCH ?{source_clause}
             ORDER BY fts.rank ASC
             LIMIT ?
             """,
-            (fts_query, top_k),
+            params,
         ).fetchall()
     except sqlite3.OperationalError:
         rows = []
@@ -55,8 +68,12 @@ def vector_search(
     conn: sqlite3.Connection,
     query_vec: np.ndarray,
     top_k: int = 50,
+    source: str | None = None,
+    namespace: str | None = None,
 ) -> list[dict]:
     """sqlite-vec exact nearest neighbor search. Returns ranked by distance (closest first)."""
+    # Fetch extra results when filtering, since sqlite-vec doesn't support WHERE clauses
+    fetch_k = top_k * 3 if (source or namespace) else top_k
     blob = serialize_f32(query_vec)
     rows = conn.execute(
         """
@@ -68,7 +85,7 @@ def vector_search(
         ORDER BY distance
         LIMIT ?
         """,
-        (blob, top_k),
+        (blob, fetch_k),
     ).fetchall()
 
     if not rows:
@@ -101,7 +118,16 @@ def vector_search(
                     "distance": row["distance"],
                 }
             )
-    return results
+
+    # Post-filter by source/namespace (sqlite-vec doesn't support JOINs in WHERE)
+    if source == "memories":
+        results = [r for r in results if r["file_path"].startswith("memory://")]
+    elif source == "files":
+        results = [r for r in results if not r["file_path"].startswith("memory://")]
+    if namespace is not None:
+        prefix = f"memory://{namespace}/"
+        results = [r for r in results if r["file_path"].startswith(prefix)]
+    return results[:top_k]
 
 
 def rrf_fusion(
@@ -213,10 +239,12 @@ def hybrid_search(
     top_k: int = 5,
     expand: bool = False,
     expand_model: str = "qwen3:0.6b",
+    source: str | None = None,
+    namespace: str | None = None,
 ) -> list[dict]:
     """Full hybrid search: BM25 + vector + RRF fusion. Optional LLM query expansion."""
     # BM25 always uses original query (lexical match)
-    bm25_results = bm25_search(conn, query, top_k=50)
+    bm25_results = bm25_search(conn, query, top_k=50, source=source, namespace=namespace)
 
     # Vector search: optionally use expanded query for richer embedding
     vec_query = query
@@ -226,7 +254,7 @@ def hybrid_search(
             vec_query = f"{query} {expanded}"
 
     query_vec = embedder([vec_query])[0]
-    vec_results = vector_search(conn, query_vec, top_k=50)
+    vec_results = vector_search(conn, query_vec, top_k=50, source=source, namespace=namespace)
     # Fuse with extra headroom, then dedup by content hash to avoid duplicated files
     fused = rrf_fusion(bm25_results, vec_results, top_k=top_k * 15)
 

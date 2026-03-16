@@ -111,3 +111,86 @@ def test_search_vault_tool_returns_correct_schema(tmp_path, monkeypatch):
     assert "chunk_idx" in r
     assert "content" in r
     assert "score" in r
+
+
+# ── MCP tool registration tests ──────────────────────────────────────
+
+
+def _mcp_tool_names() -> dict:
+    import asyncio
+
+    from mdvault.mcp_server import mcp_app
+
+    tools = asyncio.run(mcp_app.list_tools())
+    return {t.name: t for t in tools}
+
+
+def test_mcp_store_memory_tool_exists():
+    """MCP server exposes store_memory tool."""
+    assert "store_memory" in _mcp_tool_names()
+
+
+def test_mcp_delete_memory_tool_exists():
+    """MCP server exposes delete_memory tool."""
+    assert "delete_memory" in _mcp_tool_names()
+
+
+def test_mcp_update_memory_tool_exists():
+    """MCP server exposes update_memory tool."""
+    assert "update_memory" in _mcp_tool_names()
+
+
+def test_mcp_search_vault_has_source_param():
+    """search_vault tool accepts source parameter."""
+    tools = _mcp_tool_names()
+    search_tool = tools["search_vault"]
+    schema = search_tool.inputSchema
+    assert "source" in schema.get("properties", {})
+
+
+# ── CLI remember / forget / memories tests ────────────────────────────
+
+
+def test_remember_command(tmp_path):
+    """mdvault remember stores a memory."""
+    db_path = tmp_path / "test.db"
+    result = runner.invoke(app, ["remember", "Python is great for scripting", "--db", str(db_path)])
+    assert result.exit_code == 0, result.output
+    assert "Stored" in result.output
+
+
+def test_forget_by_id(tmp_path):
+    """mdvault forget --id removes a memory."""
+    db_path = tmp_path / "test.db"
+    result = runner.invoke(app, ["remember", "To forget soon", "--db", str(db_path)])
+    assert result.exit_code == 0, result.output
+    # Extract 8-char hex id from output like "Stored a1b2c3d4 (1 chunks)"
+    import re
+
+    match = re.search(r"Stored ([0-9a-f]{8})", result.output)
+    assert match is not None, f"Could not find id in: {result.output}"
+    mem_id = match.group(1)
+
+    result = runner.invoke(app, ["forget", "--id", mem_id, "--db", str(db_path)])
+    assert result.exit_code == 0, result.output
+    assert "Deleted" in result.output
+
+
+def test_memories_list(tmp_path):
+    """mdvault memories lists stored memories."""
+    db_path = tmp_path / "test.db"
+    runner.invoke(app, ["remember", "Fact one content", "--db", str(db_path), "--namespace", "test"])
+    runner.invoke(app, ["remember", "Fact two content", "--db", str(db_path), "--namespace", "test"])
+
+    result = runner.invoke(app, ["memories", "--db", str(db_path)])
+    assert result.exit_code == 0, result.output
+    assert "2" in result.output
+
+
+def test_search_with_source_flag(tmp_path):
+    """mdvault search --source memories works."""
+    db_path = tmp_path / "test.db"
+    runner.invoke(app, ["remember", "Databases are fundamental to computing", "--db", str(db_path)])
+
+    result = runner.invoke(app, ["search", "databases", "--db", str(db_path), "--source", "memories"])
+    assert result.exit_code == 0, result.output

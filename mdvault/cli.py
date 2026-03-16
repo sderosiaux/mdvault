@@ -6,6 +6,8 @@ import typer
 
 from mdvault.db import get_connection, init_db
 from mdvault.indexer import index_directory
+from mdvault.memory import delete_memory as _delete_mem
+from mdvault.memory import store_memory as _store_mem
 from mdvault.retriever import get_total_chunks, hybrid_search
 from mdvault.retriever import related_notes as _related_notes
 
@@ -76,6 +78,7 @@ def search(
     top_k: int = typer.Option(5, "--top-k", help="Number of results to return"),
     expand: bool = typer.Option(False, "--expand", help="Expand query via local LLM (requires Ollama)"),
     expand_model: str = typer.Option("qwen3:0.6b", "--expand-model", help="Ollama model for query expansion"),
+    source: str | None = typer.Option(None, "--source", help="Filter: 'files', 'memories', or all"),
 ):
     """Search the vault using hybrid BM25 + vector search."""
     db_path = _resolve_db(db)
@@ -86,7 +89,7 @@ def search(
     embedder = _get_embedder()
     conn = get_connection(db_path)
     total = get_total_chunks(conn)
-    results = hybrid_search(conn, query, embedder, top_k=top_k, expand=expand, expand_model=expand_model)
+    results = hybrid_search(conn, query, embedder, top_k=top_k, expand=expand, expand_model=expand_model, source=source)
     conn.close()
 
     typer.echo(f"Query: {query}")
@@ -182,6 +185,85 @@ def related(
             typer.echo(f"  {s}")
     else:
         typer.echo("Similar → (none)")
+
+
+@app.command()
+def remember(
+    content: str = typer.Argument(..., help="Memory content to store"),
+    db: str | None = typer.Option(None, "--db", help="Path to database file"),
+    namespace: str = typer.Option("", "--namespace", "-n", help="Namespace (e.g. user/prefs)"),
+    source: str = typer.Option("cli", "--source", "-s", help="Source identifier"),
+):
+    """Store a memory in the vault."""
+    db_path = _resolve_db(db)
+    init_db(db_path)
+    embedder = _get_embedder()
+    conn = get_connection(db_path)
+    result = _store_mem(conn, content, embedder, namespace=namespace, source=source)
+    conn.commit()
+    conn.close()
+    typer.echo(f"Stored {result['id']} ({result['chunks']} chunks)")
+
+
+@app.command()
+def forget(
+    id: str | None = typer.Option(None, "--id", help="Memory ID to delete"),
+    namespace: str | None = typer.Option(None, "--namespace", "-n", help="Delete all memories in namespace"),
+    db: str | None = typer.Option(None, "--db", help="Path to database file"),
+):
+    """Delete memories by ID or namespace."""
+    if not id and not namespace:
+        typer.echo("Error: provide --id or --namespace")
+        raise typer.Exit(1)
+    db_path = _resolve_db(db)
+    if not db_path.exists():
+        typer.echo("Error: Database not found.")
+        raise typer.Exit(1)
+    conn = get_connection(db_path)
+    count = _delete_mem(conn, id=id, namespace=namespace)
+    conn.commit()
+    conn.close()
+    typer.echo(f"Deleted {count} memories")
+
+
+@app.command()
+def memories(
+    db: str | None = typer.Option(None, "--db", help="Path to database file"),
+    namespace: str | None = typer.Option(None, "--namespace", "-n", help="Filter by namespace"),
+):
+    """List stored memories."""
+    db_path = _resolve_db(db)
+    if not db_path.exists():
+        typer.echo("Error: Database not found.")
+        raise typer.Exit(1)
+    conn = get_connection(db_path)
+
+    query = (
+        "SELECT f.file_path, mm.namespace, mm.source, mm.created_at,"
+        " (SELECT COUNT(*) FROM chunks c WHERE c.file_id = f.id) as chunk_count"
+        " FROM memory_meta mm"
+        " JOIN files f ON f.id = mm.file_id"
+    )
+    params: list = []
+    if namespace:
+        query += " WHERE mm.namespace = ?"
+        params.append(namespace)
+    query += " ORDER BY mm.created_at DESC"
+
+    rows = conn.execute(query, params).fetchall()
+    conn.close()
+
+    if not rows:
+        typer.echo("No memories stored.")
+        return
+
+    typer.echo(f"Memories: {len(rows)}")
+    typer.echo("")
+    for row in rows:
+        path = row["file_path"]
+        mem_id = path.rsplit("/", 1)[-1]
+        ns = row["namespace"] or "(none)"
+        typer.echo(f"  {mem_id}  ns={ns}  src={row['source']}  chunks={row['chunk_count']}  {row['created_at']}")
 
 
 @app.command()
