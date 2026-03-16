@@ -17,9 +17,14 @@ def bm25_search(
 ) -> list[dict]:
     """FTS5 BM25 search. Returns ranked results (best first)."""
     # Build FTS5 query: bigrams (boosted via NEAR) + unigrams for partial matches
-    tokens = [token.replace('"', '""') for token in query.split() if token]
+    tokens = [token.replace('"', '""') for token in query.split() if len(token) > 2]
     parts = [f'NEAR("{tokens[i]}" "{tokens[i + 1]}", 3)' for i in range(len(tokens) - 1)]
     parts.extend(f'"{t}"' for t in tokens)
+    # Add focused AND clause: top 3 longest terms (FTS5 AND has higher precedence than OR)
+    sorted_toks = sorted(tokens, key=len, reverse=True)
+    if len(sorted_toks) >= 3:
+        focused = " ".join(f'"{t}"' for t in sorted_toks[:3])
+        parts.insert(0, focused)
     fts_query = " OR ".join(parts) if parts else query
 
     try:
@@ -103,8 +108,8 @@ def rrf_fusion(
     bm25_results: list[dict],
     vec_results: list[dict],
     top_k: int = 5,
-    k: int = 20,
-    bm25_weight: float = 1.5,
+    k: int = 10,
+    bm25_weight: float = 4.0,
     vec_weight: float = 1.0,
 ) -> list[dict]:
     """Weighted Reciprocal Rank Fusion. score = w_bm25/(k+rank_bm25) + w_vec/(k+rank_vec)."""
@@ -223,11 +228,55 @@ def hybrid_search(
     query_vec = embedder([vec_query])[0]
     vec_results = vector_search(conn, query_vec, top_k=50)
     # Fuse with extra headroom, then dedup by content hash to avoid duplicated files
-    fused = rrf_fusion(bm25_results, vec_results, top_k=top_k * 10)
-    deduped = _dedup_results(fused, conn, top_k * 5)
+    fused = rrf_fusion(bm25_results, vec_results, top_k=top_k * 15)
+
+    # File-level aggregation: files with multiple matching chunks get a bonus
+    file_counts: dict[str, int] = {}
+    for r in fused:
+        fp = r["file_path"]
+        file_counts[fp] = file_counts.get(fp, 0) + 1
+    for r in fused:
+        extra = file_counts.get(r["file_path"], 1) - 1
+        if extra > 0:
+            r["score"] = r.get("score", 0.0) + extra * 0.01
+
+    deduped = _dedup_results(fused, conn, top_k * 8)
+
+    # Re-rank: boost by query term coverage (union across all file chunks in fused)
+    query_terms = {t.lower() for t in query.split() if len(t) > 2}
+    file_raw: dict[str, str] = {}
+    for r in fused:
+        fp = r["file_path"]
+        if fp not in file_raw:
+            file_raw[fp] = r.get("raw_content", "").lower()
+        else:
+            file_raw[fp] += " " + r.get("raw_content", "").lower()
+    for r in deduped:
+        raw = file_raw.get(r["file_path"], "")
+        covered = sum(1 for t in query_terms if t in raw)
+        coverage = covered / len(query_terms) if query_terms else 0
+        r["score"] = r.get("score", 0.0) + coverage * 0.15
+
+    # Re-rank: boost by title match (H1 heading from context prefix)
+    for r in deduped:
+        content = r.get("content", "")
+        if content.startswith("[") and "]\n" in content:
+            prefix = content.split("]\n", 1)[0][1:]
+            prefix_parts = [p.strip() for p in prefix.split(">")]
+            if len(prefix_parts) >= 2:
+                title = prefix_parts[1]
+                title_tokens = {
+                    tok for tok in title.lower().replace("-", " ").replace("_", " ").split() if len(tok) > 2
+                }
+                if title_tokens:
+                    title_matches = sum(
+                        1 for qt in query_terms if any(tt.startswith(qt) or qt.startswith(tt) for tt in title_tokens)
+                    )
+                    if title_matches:
+                        ratio = title_matches / len(query_terms) if query_terms else 0
+                        r["score"] = r.get("score", 0.0) + ratio * 0.20
 
     # Re-rank: boost by path segment match (filename + parent dirs)
-    query_terms = {t.lower() for t in query.split() if len(t) > 2}
     for r in deduped:
         fp = r["file_path"]
         # Extract all path segments as tokens (dirs + filename without extension)
@@ -240,10 +289,10 @@ def hybrid_search(
                     path_tokens.add(tok)
         if not path_tokens:
             continue
-        matches = len(query_terms & path_tokens)
+        matches = sum(1 for qt in query_terms if any(pt.startswith(qt) or qt.startswith(pt) for pt in path_tokens))
         if matches:
             ratio = matches / len(query_terms) if query_terms else 0
-            r["score"] = r.get("score", 0.0) + ratio * 0.25
+            r["score"] = r.get("score", 0.0) + ratio * 0.30
 
     deduped.sort(key=lambda r: r.get("score", 0.0), reverse=True)
     return deduped[:top_k]
