@@ -46,8 +46,10 @@ mdvault search "ssh tunnel" --top-k 10
 
 # Search with query expansion (requires Ollama running locally)
 mdvault search "ssh tunnel" --expand
+mdvault search "ssh tunnel" --expand --expand-model qwen3:0.6b  # default model
 
 # Related notes: links, backlinks, and semantically similar files
+# (file path is relative to the vault root)
 mdvault related path/to/note.md
 
 # Stats
@@ -107,7 +109,7 @@ Query
 
 **Chunking** splits files on `##`/`###` headings (max 400 words, 50-word overlap, small sections merged). Each chunk is prefixed with its document context (`[path > title > heading]`) before embedding and FTS indexing — this improves retrieval by grounding chunks in their source document.
 
-**Query expansion** (opt-in via `--expand`) calls a local Ollama model to generate a short paragraph that a relevant document might contain, then concatenates it with the original query for vector search. BM25 always uses the original query for precise lexical matching.
+**Query expansion** (opt-in via `--expand`) calls a local [Ollama](https://ollama.ai) model (default: `qwen3:0.6b`) to generate a short paragraph that a relevant document might contain, then concatenates it with the original query for vector search. BM25 always uses the original query for precise lexical matching. Install Ollama and pull the model with `ollama pull qwen3:0.6b`.
 
 ## Tech Stack
 
@@ -137,7 +139,7 @@ uv sync --dev
 uv run pytest -q
 ```
 
-Pre-commit hooks (ruff lint + format) are installed automatically:
+Install pre-commit hooks (ruff lint + format):
 
 ```bash
 uv run pre-commit install
