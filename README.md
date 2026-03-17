@@ -18,22 +18,30 @@ Zero infrastructure. Everything lives in a single `.db` file.
 - **MCP server** — Claude Code can search your vault and explore related notes
 - **Single file** — one `.db` holds everything (FTS5 index + vectors + link graph + metadata)
 
-## Install
+## Quick Start
 
-Requires Python 3.11+.
+> Paste `install https://github.com/sderosiaux/mdvault` in Claude Code — it will follow these steps.
 
 ```bash
-# Run without installing (downloads on first use)
-uvx mdvault --help
+# 1. Install
+uv tool install mdvault  # or: uv tool install git+https://github.com/sderosiaux/mdvault
 
-# Install from PyPI
-uv tool install mdvault
+# 2. Index your notes
+mdvault index ~/notes/
 
-# Install from GitHub (latest)
-uv tool install git+https://github.com/sderosiaux/mdvault
+# 3. Add MCP server to Claude Code (~/.claude/mcp.json)
+#    Add this entry under "mcpServers":
+#    "mdvault": { "command": "uvx", "args": ["mdvault", "serve"] }
 
-# Without uv
-pipx install mdvault
+# 4. Restart Claude Code, then ask:
+#    "search my notes for kubernetes setup"
+```
+
+### Other install methods
+
+```bash
+uvx mdvault --help              # run without installing
+pipx install mdvault             # without uv
 ```
 
 ## CLI Usage
