@@ -11,7 +11,7 @@ license = { file = "LICENSE" }
 authors = [{ name = "Stephane Derosiaux" }]
 keywords = ["markdown", "search", "mcp", "rag", "sqlite", "embeddings", "claude"]
 classifiers = [
-    "Development Status :: 4 - Beta",
+    "Development Status :: 5 - Production/Stable",
     "Environment :: Console",
     "Intended Audience :: Developers",
     "License :: OSI Approved :: MIT License",
