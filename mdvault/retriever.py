@@ -338,6 +338,20 @@ def hybrid_search(
             boost += 0.08
         r["score"] = r.get("score", 0.0) + boost
 
+    # Re-rank: boost by first-chunk coverage (intro paragraph = topic signal)
+    first_chunk_raw: dict[str, str] = {}
+    for r in fused:
+        fp = r["file_path"]
+        if r.get("chunk_idx", 999) == 0 and fp not in first_chunk_raw:
+            first_chunk_raw[fp] = r.get("raw_content", "").lower()
+    for r in deduped:
+        fc = first_chunk_raw.get(r["file_path"], "")
+        if fc and query_terms:
+            fc_covered = sum(1 for t in query_terms if t in fc)
+            fc_cov = fc_covered / len(query_terms)
+            if fc_cov >= 0.5:
+                r["score"] = r.get("score", 0.0) + fc_cov * 0.08
+
     # Re-rank: boost by heading match (chunk heading from context prefix)
     for r in deduped:
         content = r.get("content", "")
