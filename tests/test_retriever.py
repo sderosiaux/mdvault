@@ -187,7 +187,14 @@ def test_dedup_respects_top_k(indexed_db):
     """Dedup returns at most top_k results."""
     conn = get_connection(indexed_db)
     results = [
-        {"chunk_id": i, "file_path": f"fake{i}.md", "chunk_idx": 0, "content": "", "raw_content": "", "score": 0.1}
+        {
+            "chunk_id": i,
+            "file_path": f"fake{i}.md",
+            "chunk_idx": 0,
+            "content": "",
+            "raw_content": f"content {i}",
+            "score": 0.1,
+        }
         for i in range(1, 20)
     ]
     deduped = _dedup_results(results, conn, top_k=3)

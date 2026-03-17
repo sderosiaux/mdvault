@@ -203,7 +203,7 @@ def expand_query_llm(query: str, model: str = "qwen3:0.6b") -> str | None:
 
 
 def _dedup_results(results: list[dict], conn: sqlite3.Connection, top_k: int) -> list[dict]:
-    """Deduplicate: one result per unique file content (by file_hash), then one per file_path."""
+    """Deduplicate by chunk content hash, then by file content hash, then by file_path."""
     # Build file_hash lookup for all file_paths in results
     file_paths = list({r["file_path"] for r in results})
     hash_map: dict[str, str] = {}
@@ -215,12 +215,21 @@ def _dedup_results(results: list[dict], conn: sqlite3.Connection, top_k: int) ->
         ).fetchall()
         hash_map = {row["file_path"]: row["file_hash"] for row in rows}
 
+    seen_content: set[int] = set()
     seen_hashes: set[str] = set()
     seen_paths: set[str] = set()
     deduped: list[dict] = []
     for r in results:
+        # Chunk-level dedup: normalize whitespace, truncate to first 200 chars
+        # to tolerate micro-diffs at boundaries while catching true duplicates
+        normalized = " ".join(r.get("raw_content", "").split())[:200]
+        content_key = hash(normalized)
+        if content_key in seen_content:
+            continue
+        seen_content.add(content_key)
+        # File-level dedup: skip if same file_hash (identical files at different paths)
         fp = r["file_path"]
-        fh = hash_map.get(fp, fp)  # fallback to path if hash not found
+        fh = hash_map.get(fp, fp)
         if fh in seen_hashes or fp in seen_paths:
             continue
         seen_hashes.add(fh)
