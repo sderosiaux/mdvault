@@ -2,13 +2,9 @@
 
 [![CI](https://github.com/sderosiaux/mdvault/actions/workflows/ci.yml/badge.svg)](https://github.com/sderosiaux/mdvault/actions/workflows/ci.yml)
 [![PyPI](https://img.shields.io/pypi/v/mdvault)](https://pypi.org/project/mdvault/)
-[![Status](https://img.shields.io/badge/status-alpha-orange)](https://github.com/sderosiaux/mdvault)
-
 Your Markdown notes, searchable in Claude Code.
 
 Index any folder of `.md` files — Obsidian vault, `~/.claude/` history, project docs — and search them in natural language, directly from Claude Code or the terminal. Zero infrastructure. One `.db` file.
-
-> **Alpha**: schema may change between versions. Back up your `.db` before upgrading.
 
 ## What it does
 
