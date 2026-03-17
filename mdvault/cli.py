@@ -561,6 +561,7 @@ def gaps(
             qc = row["query_count"] or "?"
             score = f"{row['avg_score']:.2f}" if row["avg_score"] else "?"
             typer.echo(f'  {mid}  "{query}"  (queried {qc} times, best score {score})')
+            typer.echo(f'    → mdvault remember "{query}: <your knowledge here>"')
 
 
 @app.command()

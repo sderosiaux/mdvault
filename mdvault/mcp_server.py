@@ -47,10 +47,11 @@ def search_vault(
     expand: bool = False,
     source: str | None = None,
     namespace: str | None = None,
+    vault: str | None = None,
 ) -> dict:
     """Search the local markdown vault using hybrid BM25 + semantic search.
     Set expand=True to use local LLM (Ollama) for query expansion.
-    Filter by source (e.g. 'agent') or namespace."""
+    Filter by source ('files' or 'memories'), namespace, or vault name."""
     db_path = _resolve_db()
     if not db_path.exists():
         return {
@@ -63,6 +64,9 @@ def search_vault(
     conn = get_connection(db_path)
     total = get_total_chunks(conn)
     results = hybrid_search(conn, query, embedder, top_k=top_k, expand=expand, source=source, namespace=namespace)
+    if vault:
+        prefix = f"{vault}/"
+        results = [r for r in results if r["file_path"].startswith(prefix)]
     conn.close()
 
     return {

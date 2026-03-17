@@ -1,10 +1,14 @@
 # mdvault
 
 [![CI](https://github.com/sderosiaux/mdvault/actions/workflows/ci.yml/badge.svg)](https://github.com/sderosiaux/mdvault/actions/workflows/ci.yml)
+[![PyPI](https://img.shields.io/pypi/v/mdvault)](https://pypi.org/project/mdvault/)
+[![Status](https://img.shields.io/badge/status-alpha-orange)](https://github.com/sderosiaux/mdvault)
 
-CLI + MCP server that indexes a folder of Markdown files into a local SQLite database and exposes **hybrid search** (BM25 + semantic + RRF) directly usable from Claude Code.
+Your Markdown notes, searchable in Claude Code.
 
-Zero infrastructure. Everything lives in a single `.db` file.
+Index any folder of `.md` files — Obsidian vault, `~/.claude/` history, project docs — and search them in natural language, directly from Claude Code or the terminal. Zero infrastructure. One `.db` file.
+
+> **Alpha**: schema may change between versions. Back up your `.db` before upgrading.
 
 ## Features
 
@@ -43,11 +47,36 @@ mdvault index ~/.claude/
 
 **4. Restart Claude Code**, then ask: *"search my notes for kubernetes setup"*
 
+### Keep the index fresh
+
+Indexing is incremental (SHA256 change detection). Set up a cron to keep it updated:
+
+```bash
+# Every 30 minutes
+(crontab -l; echo '*/30 * * * * uvx mdvault index ~/.claude/ 2>/dev/null') | crontab -
+```
+
 ### Other install methods
 
 ```bash
 uvx mdvault --help              # run without installing
 pipx install mdvault             # without uv
+```
+
+## Example
+
+```
+$ mdvault search "memory system LLM"
+
+[1] 0.983  .claude/projects/.../ae863d59.jsonl:70
+### Dedicated Memory Platforms
+- **Mem0**: Universal memory layer. $24M raised (YC-backed).
+  41K GitHub stars, 13M+ PyPI downloads...
+
+[2] 0.870  .claude/projects/.../agent-a581b10.jsonl:2
+## The mapping: CPU, RAM, disk, I/O
+Andrej Karpathy posted in October 2023 that LLMs should be
+understood "not as a chatbot, but the kernel process of a new OS."
 ```
 
 ## CLI Usage
@@ -115,7 +144,7 @@ If `VAULT_DB` is omitted, defaults to `~/.local/share/mdvault/vault.db` (Linux) 
 
 | Tool | Description |
 |---|---|
-| `search_vault` | Hybrid BM25 + semantic search with optional query expansion |
+| `search_vault` | Hybrid BM25 + semantic search. Filter by `vault`, `source`, `namespace` |
 | `related_notes` | Links, backlinks, and semantically similar files for a given note |
 | `store_memory` | Store a memory (auto-chunked, searchable alongside files) |
 | `delete_memory` | Delete memories by id or namespace |
@@ -190,9 +219,8 @@ Use `mdvault gaps` to surface recurring queries that your vault can't answer wel
 
 ## Limitations
 
-- English-only (potion-base-8M is primarily trained on English)
+- **English-optimized** — potion-base-8M is primarily trained on English. Multilingual notes will have degraded semantic search (BM25 keyword search still works)
 - Markdown only (no PDF, DOCX)
-- Single vault per instance
 - Exact vector search — scales to ~500k chunks on commodity hardware
 
 ## Development
