@@ -111,15 +111,24 @@ Once connected, ask Claude Code:
 
 ```
 Query
-  ├── FTS5 BM25 search  → top-50 ranked results
-  └── Vector search     → top-50 nearest neighbors
+  ├── FTS5 BM25 search  → top-75 (NEAR bigrams + focused AND clause)
+  └── Vector search     → top-75 nearest neighbors
           │
           ▼
-    Reciprocal Rank Fusion  (k=60)
-    score = 1/(60+rank_bm25) + 1/(60+rank_vec)
+    Reciprocal Rank Fusion  (k=15, BM25 weight 4×)
           │
           ▼
-    Top-N results with file_path + content excerpt
+    Multi-signal re-ranking
+      ├── Cosine similarity (continuous, from vec distance)
+      ├── Query term coverage (squared, with bonuses at ≥80% and 100%)
+      ├── First-chunk coverage (intro paragraph = topic signal)
+      ├── Heading match (H2/H3 heading vs query terms)
+      ├── Title match (H1 heading vs query terms)
+      ├── Path match (filename + parent dirs vs query terms)
+      └── Overview boost (about/intro pages with high coverage)
+          │
+          ▼
+    Content-hash dedup → top-N results
 ```
 
 **Chunking** splits files on `##`/`###` headings (max 400 words, 50-word overlap, small sections merged). Each chunk is prefixed with its document context (`[path > title > heading]`) before embedding and FTS indexing — this improves retrieval by grounding chunks in their source document.
