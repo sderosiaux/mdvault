@@ -20,16 +20,20 @@ Zero infrastructure. Everything lives in a single `.db` file.
 
 ## Install
 
-Requires Python 3.11+ and [uv](https://github.com/astral-sh/uv).
+Requires Python 3.11+.
 
 ```bash
+# Run without installing (downloads on first use)
 uvx mdvault --help
-```
 
-Or install permanently:
-
-```bash
+# Install from PyPI
 uv tool install mdvault
+
+# Install from GitHub (latest)
+uv tool install git+https://github.com/sderosiaux/mdvault
+
+# Without uv
+pipx install mdvault
 ```
 
 ## CLI Usage
