@@ -22,20 +22,26 @@ Zero infrastructure. Everything lives in a single `.db` file.
 
 > Paste `install https://github.com/sderosiaux/mdvault` in Claude Code — it will follow these steps.
 
+**1. Install**
 ```bash
-# 1. Install
-uv tool install mdvault  # or: uv tool install git+https://github.com/sderosiaux/mdvault
-
-# 2. Index your notes
-mdvault index ~/notes/
-
-# 3. Add MCP server to Claude Code (~/.claude/mcp.json)
-#    Add this entry under "mcpServers":
-#    "mdvault": { "command": "uvx", "args": ["mdvault", "serve"] }
-
-# 4. Restart Claude Code, then ask:
-#    "search my notes for kubernetes setup"
+uv tool install mdvault
 ```
+
+**2. Index your notes**
+```bash
+mdvault index ~/notes/
+```
+
+**3. Add MCP server** to `~/.claude/mcp.json`:
+```json
+{
+  "mcpServers": {
+    "mdvault": { "command": "uvx", "args": ["mdvault", "serve"] }
+  }
+}
+```
+
+**4. Restart Claude Code**, then ask: *"search my notes for kubernetes setup"*
 
 ### Other install methods
 
