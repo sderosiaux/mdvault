@@ -29,7 +29,7 @@ uv tool install mdvault
 
 **2. Index your notes**
 ```bash
-mdvault index ~/notes/
+mdvault index ~/.claude/
 ```
 
 **3. Add MCP server** to `~/.claude/mcp.json`:
@@ -54,10 +54,10 @@ pipx install mdvault             # without uv
 
 ```bash
 # Index your notes (downloads ~30MB model on first run)
-mdvault index ~/notes/
+mdvault index ~/.claude/
 
 # Incremental update (only changed/new/deleted files)
-mdvault index ~/notes/ --incremental
+mdvault index ~/.claude/ --incremental
 
 # Search
 mdvault search "nginx reverse proxy config"
@@ -87,7 +87,7 @@ mdvault gaps
 mdvault forget <memory-id>
 
 # Custom DB location
-mdvault index ~/notes/ --db ~/vault.db
+mdvault index ~/.claude/ --db ~/vault.db
 mdvault search "query" --db ~/vault.db
 ```
 
