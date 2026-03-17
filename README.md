@@ -10,17 +10,20 @@ Index any folder of `.md` files — Obsidian vault, `~/.claude/` history, projec
 
 > **Alpha**: schema may change between versions. Back up your `.db` before upgrading.
 
-## Features
+## What it does
 
-- **Hybrid search** — combines FTS5 BM25 and 256-dim vector search via Reciprocal Rank Fusion
-- **Contextual chunking** — each chunk is prefixed with `[path > title > heading]` for better retrieval ([Anthropic approach](https://www.anthropic.com/news/contextual-retrieval))
-- **Link graph** — parses Markdown links and `[[wikilinks]]`, surfaces backlinks and semantically similar files
-- **Query expansion** — optional local LLM (Ollama) expands queries for richer vector search
-- **Memory intelligence** — temporal decay, confidence scoring, and automatic promotion of recurring queries into long-term memory
-- **Fast embeddings** — [potion-base-8M](https://huggingface.co/minishlab/potion-base-8M) via model2vec, CPU-only, ~30MB
-- **Incremental indexing** — SHA256-based change detection, only reprocesses modified files
-- **MCP server** — Claude Code can search your vault and explore related notes
-- **Single file** — one `.db` holds everything (FTS5 index + vectors + link graph + metadata)
+Search combines FTS5 BM25 and 256-dim vectors, fused with RRF and re-ranked on 7 signals (term coverage, heading match, path match, etc).
+
+Each chunk carries its document context as a prefix (`[path > title > heading]`) before indexing, following [Anthropic's contextual retrieval](https://www.anthropic.com/news/contextual-retrieval) approach.
+
+Other things worth knowing:
+- Parses Markdown links and `[[wikilinks]]`, finds backlinks and similar files
+- Optional query expansion via local Ollama LLM
+- Memories decay over time, gain confidence when hit, and get auto-promoted from recurring queries
+- [potion-base-8M](https://huggingface.co/minishlab/potion-base-8M) embeddings, CPU-only, ~30MB download
+- Incremental indexing (SHA256 change detection, only reprocesses what changed)
+- MCP server so Claude Code can search your vault directly
+- Everything in one `.db` file (FTS5 index + vectors + link graph + metadata)
 
 ## Quick Start
 
@@ -120,7 +123,7 @@ mdvault index ~/.claude/ --db ~/vault.db
 mdvault search "query" --db ~/vault.db
 ```
 
-## Claude Code Integration (MCP)
+## Claude Code integration (MCP)
 
 Add to `~/.claude/mcp.json`:
 
@@ -149,12 +152,9 @@ If `VAULT_DB` is omitted, defaults to `~/.local/share/mdvault/vault.db` (Linux) 
 | `store_memory` | Store a memory (auto-chunked, searchable alongside files) |
 | `delete_memory` | Delete memories by id or namespace |
 
-Once connected, ask Claude Code:
-- *"search my notes for how I configured SSH tunnels"*
-- *"find everything I wrote about postgres replication"*
-- *"what notes are related to my kubernetes setup?"*
+Then ask Claude things like "search my notes for how I configured SSH tunnels" or "what notes are related to my kubernetes setup?".
 
-## How it works
+## Search pipeline
 
 ```
 Query
@@ -165,12 +165,12 @@ Query
     Reciprocal Rank Fusion  (k=15, BM25 weight 4×)
           │
           ▼
-    Multi-signal re-ranking
+    Re-ranking (7 signals)
       ├── Cosine similarity (continuous, from vec distance)
-      ├── Query term coverage (squared, with bonuses at ≥80% and 100%)
+      ├── Query term coverage (squared, bonuses at ≥80% and 100%)
       ├── First-chunk coverage (intro paragraph = topic signal)
-      ├── Heading match (H2/H3 heading vs query terms)
-      ├── Title match (H1 heading vs query terms)
+      ├── Heading match (H2/H3 vs query terms)
+      ├── Title match (H1 vs query terms)
       ├── Path match (filename + parent dirs vs query terms)
       └── Overview boost (about/intro pages with high coverage)
           │
@@ -178,21 +178,21 @@ Query
     Content-hash dedup → top-N results
 ```
 
-**Chunking** splits files on `##`/`###` headings (max 400 words, 50-word overlap, small sections merged). Each chunk is prefixed with its document context (`[path > title > heading]`) before embedding and FTS indexing — this improves retrieval by grounding chunks in their source document.
+Files are split on `##`/`###` headings (max 400 words, 50-word overlap, small sections merged). Each chunk gets a context prefix (`[path > title > heading]`) before embedding and FTS indexing.
 
-**Query expansion** (opt-in via `--expand`) calls a local [Ollama](https://ollama.ai) model (default: `qwen3:0.6b`) to generate a short paragraph that a relevant document might contain, then concatenates it with the original query for vector search. BM25 always uses the original query for precise lexical matching. Install Ollama and pull the model with `ollama pull qwen3:0.6b`.
+Query expansion (`--expand`) calls a local [Ollama](https://ollama.ai) model (default: `qwen3:0.6b`) to generate a paragraph a relevant document might contain, then appends it to the original query for vector search. BM25 always uses the raw query. Pull the model with `ollama pull qwen3:0.6b`.
 
-## Memory Intelligence
+## Memories
 
-Memories are searchable alongside your files but ranked by three implicit, metadata-driven signals — no configuration needed.
+Memories are searchable alongside files. Three things happen behind the scenes:
 
-**Temporal decay** — memories lose relevance over time. Linear decay over 180 days (floor 0.1), reset on each hit. A note you search for regularly stays fresh; one you never touch fades.
+**Decay.** Memories fade over 180 days (floor 0.1). Every search hit resets the clock. Search for something regularly and it stays relevant. Stop, and it drops in ranking.
 
-**Confidence scoring** — base confidence depends on source (`user`=0.7, `agent`=0.5, `promoted`=0.3) plus a logarithmic hit boost (capped at +0.3). Memories that prove useful gain weight.
+**Confidence.** Base score depends on source (`user`=0.7, `agent`=0.5, `promoted`=0.3) plus a log hit boost (capped at +0.3). Memories that keep getting matched climb higher.
 
-**Automatic promotion** — every search is logged. Queries are clustered by embedding similarity (cosine > 0.85). When a cluster reaches 5+ occurrences:
-- If results were good (avg score ≥ 0.3), the best result is crystallized as a permanent memory
-- If results were poor (avg score < 0.15), a knowledge gap is recorded
+**Auto-promotion.** Every search is logged and clustered by embedding similarity (cosine > 0.85). When a cluster hits 5+ occurrences:
+- Good results (avg score >= 0.3): the best result becomes a permanent memory
+- Bad results (avg score < 0.15): a knowledge gap is recorded
 
 ```
 Search query
@@ -203,7 +203,7 @@ Search query
         └── maybe_promote (crystallize or flag gap)
 ```
 
-Use `mdvault gaps` to surface recurring queries that your vault can't answer well.
+Run `mdvault gaps` to see what you keep searching for but can't find.
 
 ## Tech Stack
 
@@ -219,7 +219,7 @@ Use `mdvault gaps` to surface recurring queries that your vault can't answer wel
 
 ## Limitations
 
-- **English-optimized** — potion-base-8M is primarily trained on English. Multilingual notes will have degraded semantic search (BM25 keyword search still works)
+- English-optimized: potion-base-8M is trained mostly on English. Semantic search degrades on other languages (BM25 keyword search still works)
 - Markdown only (no PDF, DOCX)
 - Exact vector search — scales to ~500k chunks on commodity hardware
 
