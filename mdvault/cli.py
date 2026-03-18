@@ -675,6 +675,134 @@ def list_files(
 
 
 @app.command()
+def suggest_insights(
+    db: str | None = typer.Option(None, "--db", help="Path to database file"),
+    knowledge_dir: str = typer.Option(
+        "~/.claude/knowledge", "--knowledge-dir", "-k", help="Knowledge dir to dedup against"
+    ),
+    markers: str = typer.Option(
+        "NEW_SKILL,NEW_CMD,CLAUDE_MD,MISSED_CMD,COMBO,STUCK_PATTERN,CMD_EVOLVE,PROMPT_FIX",
+        "--markers",
+        help="Comma-separated insight markers to search for",
+    ),
+    vault: str | None = typer.Option(None, "--vault", help="Scope to specific vault"),
+    top_k: int = typer.Option(50, "--top-k", help="Results from vault search"),
+    min_feedback: float | None = typer.Option(None, "--min-feedback", help="Min avg chunk_feedback score (0.0-1.0)"),
+    json: bool = typer.Option(False, "--json", "-j", help="Output JSON"),
+):
+    """Surface actionable insights from sessions: NEW_CMD, NEW_SKILL, CLAUDE_MD, etc."""
+    import re
+
+    db_path = _resolve_db(db)
+    _require_db(db_path)
+    embedder = _get_embedder()
+    conn = get_connection(db_path)
+
+    marker_list = [m.strip().upper() for m in markers.split(",") if m.strip()]
+
+    # Build knowledge corpus for dedup
+    kdir = Path(knowledge_dir).expanduser()
+    knowledge_text = ""
+    if kdir.exists():
+        import contextlib
+
+        for kf in kdir.rglob("*.md"):
+            with contextlib.suppress(Exception):
+                knowledge_text += kf.read_text(errors="ignore").lower() + "\n"
+
+    # role=assistant: structured markers live in Claude's outputs, not user messages
+    query = " ".join(marker_list)
+    results = hybrid_search(conn, query, embedder, top_k=top_k, role="assistant")
+
+    if vault:
+        prefix = f"{vault}/"
+        results = [r for r in results if r["file_path"].startswith(prefix)]
+
+    # Apply chunk_feedback filter if requested
+    if min_feedback is not None:
+        filtered = []
+        for r in results:
+            row = conn.execute(
+                "SELECT AVG(score) as avg FROM chunk_feedback WHERE chunk_id = ?",
+                (r["chunk_id"],),
+            ).fetchone()
+            fb = row["avg"] if row and row["avg"] is not None else None
+            if fb is None or fb >= min_feedback:
+                filtered.append({**r, "_feedback": fb})
+        results = filtered
+    else:
+        results = [{**r, "_feedback": None} for r in results]
+
+    conn.close()
+
+    # Parse structured markers from chunk content
+    # Matches: "NEW_CMD: /foo — description" or "NEW_SKILL | topic — detail"
+    pattern = re.compile(
+        r"\b(" + "|".join(re.escape(m) for m in marker_list) + r")\b[:\s\|]+([^\n]{10,150})",
+        re.IGNORECASE,
+    )
+
+    def _core_id(text: str) -> str:
+        """Extract core identifier for dedup: strip severity, backticks, take part before ' — '."""
+        t = re.sub(r"\s+", " ", text).strip()
+        t = re.sub(r"^(CRITICAL|HIGH|MEDIUM|LOW)\s*[\|:—\-]+\s*", "", t, flags=re.IGNORECASE)
+        t = t.strip("`'\"").strip()
+        # Take only the part before ' — ' or ' | ' or ' (' to get the slug
+        t = re.split(r"\s+[—\|\(]", t)[0].strip().rstrip("`'\"").strip()
+        return t.lower()[:40]
+
+    # Use best-description-wins: key → (description, score, feedback, file_path)
+    best: dict[tuple[str, str], dict] = {}  # (marker_type, core_id) → item
+
+    for r in results:
+        for match in pattern.finditer(r["raw_content"]):
+            marker_type = match.group(1).upper()
+            raw_desc = re.sub(r"\s+", " ", match.group(2)).strip().rstrip("|—-").strip()
+            if len(raw_desc) < 10:
+                continue
+            core = _core_id(raw_desc)
+            if not core or core in knowledge_text:
+                continue
+            key = (marker_type, core)
+            existing = best.get(key)
+            # Keep the longer/more descriptive entry
+            if existing is None or len(raw_desc) > len(existing["description"]):
+                best[key] = {
+                    "description": raw_desc[:200],
+                    "file_path": r["file_path"],
+                    "score": round(r["score"], 3),
+                    "feedback": round(r["_feedback"], 2) if r["_feedback"] is not None else None,
+                }
+
+    candidates: dict[str, list[dict]] = {m: [] for m in marker_list}
+    for (marker_type, _), item in best.items():
+        if marker_type in candidates:
+            candidates[marker_type].append(item)
+
+    candidates = {k: v for k, v in candidates.items() if v}
+
+    if not candidates:
+        if json:
+            typer.echo(_json.dumps({}))
+        else:
+            typer.echo("No insights found.")
+        return
+
+    if json:
+        typer.echo(_json.dumps(candidates))
+        return
+
+    total = sum(len(v) for v in candidates.values())
+    typer.echo(f"Insights: {total} candidates\n")
+    for marker_type, items in candidates.items():
+        typer.echo(f"{marker_type} ({len(items)})")
+        for item in items:
+            fb = f"  [fb={item['feedback']:.2f}]" if item["feedback"] is not None else ""
+            typer.echo(f"  - {item['description']}{fb}")
+        typer.echo("")
+
+
+@app.command()
 def serve(
     db: str | None = typer.Option(None, "--db", help="Path to database file"),
 ):
