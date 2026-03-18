@@ -174,6 +174,7 @@ def search(
     expand: bool = typer.Option(False, "--expand", help="Expand query via local LLM (requires Ollama)"),
     expand_model: str = typer.Option("qwen3:0.6b", "--expand-model", help="Ollama model for query expansion"),
     source: str | None = typer.Option(None, "--source", help="Filter: 'files' or 'memories'"),
+    role: str | None = typer.Option(None, "--role", help="Filter by message role: 'user' or 'assistant'"),
     vault: str | None = typer.Option(None, "--vault", help="Filter results by vault name"),
     paths_only: bool = typer.Option(False, "--paths-only", help="Output unique file paths only"),
     no_truncate: bool = typer.Option(False, "--no-truncate", help="Show full content (no 500-char limit)"),
@@ -186,12 +187,17 @@ def search(
     if source and source not in ("files", "memories"):
         typer.echo("Error: --source must be 'files' or 'memories'", err=True)
         raise typer.Exit(1)
+    if role and role not in ("user", "assistant"):
+        typer.echo("Error: --role must be 'user' or 'assistant'", err=True)
+        raise typer.Exit(1)
 
     embedder = _get_embedder()
     conn = get_connection(db_path)
     total = get_total_chunks(conn)
     roots = _vault_roots(conn)
-    results = hybrid_search(conn, query, embedder, top_k=top_k, expand=expand, expand_model=expand_model, source=source)
+    results = hybrid_search(
+        conn, query, embedder, top_k=top_k, expand=expand, expand_model=expand_model, source=source, role=role
+    )
     conn.close()
 
     if vault:

@@ -41,7 +41,8 @@ def init_db(db_path: str | Path) -> None:
             file_id     INTEGER NOT NULL REFERENCES files(id) ON DELETE CASCADE,
             chunk_idx   INTEGER NOT NULL,
             content     TEXT NOT NULL,
-            raw_content TEXT NOT NULL
+            raw_content TEXT NOT NULL,
+            metadata    TEXT NOT NULL DEFAULT '{}'
         );
 
         CREATE INDEX IF NOT EXISTS idx_chunks_file_id ON chunks(file_id);
@@ -115,10 +116,13 @@ def init_db(db_path: str | Path) -> None:
 
     conn.commit()
 
-    # Migrate older DBs that lack raw_content column
+    # Migrations for older DBs
     cols = {row[1] for row in conn.execute("PRAGMA table_info(chunks)").fetchall()}
     if "raw_content" not in cols:
         conn.execute("ALTER TABLE chunks ADD COLUMN raw_content TEXT NOT NULL DEFAULT ''")
+        conn.commit()
+    if "metadata" not in cols:
+        conn.execute("ALTER TABLE chunks ADD COLUMN metadata TEXT NOT NULL DEFAULT '{}'")
         conn.commit()
 
     # Migrate older DBs that lack memory_meta intelligence columns
@@ -128,6 +132,19 @@ def init_db(db_path: str | Path) -> None:
         conn.execute("ALTER TABLE memory_meta ADD COLUMN hit_count INTEGER NOT NULL DEFAULT 0")
         conn.execute("ALTER TABLE memory_meta ADD COLUMN last_hit_at DATETIME")
         conn.commit()
+
+    # chunk_feedback table for implicit utility signals
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS chunk_feedback (
+            id         INTEGER PRIMARY KEY,
+            chunk_id   INTEGER NOT NULL REFERENCES chunks(id) ON DELETE CASCADE,
+            score      REAL NOT NULL,
+            session_id TEXT,
+            created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+        )
+    """)
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_chunk_feedback_chunk ON chunk_feedback(chunk_id)")
+    conn.commit()
 
     # Re-enable foreign keys (executescript resets pragmas)
     conn.execute("PRAGMA foreign_keys = ON")

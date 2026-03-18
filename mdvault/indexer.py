@@ -18,6 +18,11 @@ from mdvault.db import serialize_f32
 class Chunk:
     content: str
     heading: str | None = None
+    metadata: dict = None  # type: ignore[assignment]
+
+    def __post_init__(self) -> None:
+        if self.metadata is None:
+            self.metadata = {}
 
 
 def _extract_title(content: str) -> str | None:
@@ -183,13 +188,13 @@ def _list_files(vault_root: Path, no_gitignore: bool = False) -> list[Path]:
         return sorted(files)
 
 
-def _extract_jsonl_text(raw: bytes) -> str | None:
-    """Extract searchable text from a Claude Code session JSONL file.
+def _extract_jsonl_chunks(raw: bytes, session_id: str) -> list[Chunk]:
+    """Extract structured chunks from a Claude Code session JSONL file.
 
-    Extracts user prompts and assistant text blocks, skipping thinking/tool_use/progress.
-    Returns markdown-formatted text or None if no useful content.
+    One chunk per message turn (user or assistant). Skips thinking/tool_use/progress.
+    Each chunk carries metadata: role, message_id, model, session_id.
     """
-    parts: list[str] = []
+    chunks: list[Chunk] = []
     for raw_line in raw.split(b"\n"):
         stripped = raw_line.strip()
         if not stripped:
@@ -206,30 +211,190 @@ def _extract_jsonl_text(raw: bytes) -> str | None:
 
         if msg_type == "user":
             content = msg.get("content", "")
-            if isinstance(content, str) and content.strip():
-                parts.append(f"## User\n{content.strip()}")
+            text = ""
+            if isinstance(content, str):
+                text = content.strip()
             elif isinstance(content, list):
+                parts = []
                 for block in content:
                     if isinstance(block, dict) and block.get("type") == "text":
-                        text = block.get("text", "").strip()
-                        if text:
-                            parts.append(f"## User\n{text}")
+                        t = block.get("text", "").strip()
+                        if t:
+                            parts.append(t)
+                text = "\n".join(parts)
+            if text:
+                chunks.append(
+                    Chunk(
+                        content=text,
+                        heading="User",
+                        metadata={
+                            "role": "user",
+                            "message_id": msg.get("id", ""),
+                            "session_id": session_id,
+                        },
+                    )
+                )
 
         elif msg_type == "assistant":
             content = msg.get("content", [])
             if isinstance(content, list):
-                texts = []
-                for block in content:
-                    if isinstance(block, dict) and block.get("type") == "text":
-                        text = block.get("text", "").strip()
-                        if text:
-                            texts.append(text)
-                if texts:
-                    parts.append(f"## Assistant\n{chr(10).join(texts)}")
+                texts = [
+                    block.get("text", "").strip()
+                    for block in content
+                    if isinstance(block, dict) and block.get("type") == "text"
+                ]
+                text = "\n".join(t for t in texts if t)
+                if text:
+                    chunks.append(
+                        Chunk(
+                            content=text,
+                            heading="Assistant",
+                            metadata={
+                                "role": "assistant",
+                                "message_id": msg.get("id", ""),
+                                "model": msg.get("model", ""),
+                                "session_id": session_id,
+                            },
+                        )
+                    )
 
-    if not parts:
-        return None
-    return "\n\n".join(parts)
+    return chunks
+
+
+def _parse_mdvault_search_output(output: str) -> list[str]:
+    """Extract file_path:chunk_idx identifiers from mdvault search CLI output.
+
+    mdvault search output format:
+      [1] 0.983  vault/path/to/file.md:2
+      content snippet...
+    """
+    results = []
+    for line in output.splitlines():
+        m = re.match(r"\[\d+\]\s+[\d.]+\s+(\S+:\d+)", line.strip())
+        if m:
+            results.append(m.group(1))
+    return results
+
+
+def analyze_session_feedback(
+    conn: sqlite3.Connection,
+    raw: bytes,
+    session_id: str,
+    embedder,
+) -> None:
+    """Detect mdvault search CLI calls in a JSONL session and score chunk utility.
+
+    Looks for: assistant Bash tool_use with 'mdvault search' → user tool_result (stdout)
+    → next assistant text. Computes cosine similarity between assistant response and
+    retrieved chunks. Stores signals in chunk_feedback.
+    """
+    import numpy as np
+
+    records = []
+    for raw_line in raw.split(b"\n"):
+        stripped = raw_line.strip()
+        if not stripped:
+            continue
+        try:
+            records.append(json.loads(stripped))
+        except (json.JSONDecodeError, ValueError):  # noqa: S112
+            continue
+
+    # Index tool_use id → search results (file_path:chunk_idx strings)
+    pending: dict[str, list[str]] = {}  # tool_use_id → [file:idx, ...]
+
+    for rec in records:
+        msg_type = rec.get("type", "")
+        msg = rec.get("message", {})
+        if not isinstance(msg, dict):
+            continue
+
+        # Detect Bash tool_use containing "mdvault search"
+        if msg_type == "assistant":
+            for block in msg.get("content", []):
+                if not isinstance(block, dict):
+                    continue
+                if block.get("type") == "tool_use" and block.get("name") == "Bash":
+                    cmd = block.get("input", {}).get("command", "")
+                    if "mdvault" in cmd and "search" in cmd:
+                        pending[block["id"]] = []
+
+        # Collect tool_result for pending tool_use ids
+        elif msg_type == "user":
+            for block in msg.get("content", []):
+                if not isinstance(block, dict):
+                    continue
+                if block.get("type") == "tool_result":
+                    tool_id = block.get("tool_use_id", "")
+                    if tool_id in pending:
+                        output = ""
+                        c = block.get("content", "")
+                        if isinstance(c, str):
+                            output = c
+                        elif isinstance(c, list):
+                            output = "\n".join(
+                                b.get("text", "") for b in c if isinstance(b, dict) and b.get("type") == "text"
+                            )
+                        pending[tool_id] = _parse_mdvault_search_output(output)
+
+            # After collecting results, look for next assistant text to score
+            # (we process this as we find the next assistant message below)
+
+        # Next assistant text after a completed tool_result
+        elif msg_type == "assistant" and pending:
+            texts = [
+                block.get("text", "").strip()
+                for block in msg.get("content", [])
+                if isinstance(block, dict) and block.get("type") == "text"
+            ]
+            response_text = "\n".join(t for t in texts if t)
+            if not response_text:
+                continue
+
+            # Score against all pending search results that have been resolved
+            completed = {tid: paths for tid, paths in pending.items() if paths}
+            if not completed:
+                continue
+
+            response_vec = embedder([response_text])[0]
+
+            for paths in completed.values():
+                for path_idx in paths:
+                    # Resolve chunk in DB: file_path and chunk_idx
+                    parts = path_idx.rsplit(":", 1)
+                    if len(parts) != 2:
+                        continue
+                    file_path, chunk_idx_str = parts
+                    if not chunk_idx_str.isdigit():
+                        continue
+                    chunk_idx = int(chunk_idx_str)
+
+                    row = conn.execute(
+                        """
+                        SELECT c.id, c.raw_content FROM chunks c
+                        JOIN files f ON c.file_id = f.id
+                        WHERE f.file_path = ? AND c.chunk_idx = ?
+                        """,
+                        (file_path, chunk_idx),
+                    ).fetchone()
+                    if not row:
+                        continue
+
+                    chunk_vec = embedder([row["raw_content"]])[0]
+                    sim = float(
+                        np.dot(response_vec, chunk_vec)
+                        / (np.linalg.norm(response_vec) * np.linalg.norm(chunk_vec) + 1e-9)
+                    )
+
+                    if sim > 0.7:
+                        conn.execute(
+                            "INSERT INTO chunk_feedback (chunk_id, score, session_id) VALUES (?, ?, ?)",
+                            (row["id"], sim, session_id),
+                        )
+
+            # Clear completed entries from pending
+            for tid in list(completed.keys()):
+                del pending[tid]
 
 
 def _extract_links(content: str, source_rel_path: str) -> list[str]:
@@ -287,25 +452,23 @@ def index_file(
     file_hash = hashlib.sha256(raw).hexdigest()
 
     if file_path.suffix == ".jsonl":
-        content = _extract_jsonl_text(raw)
-        if not content:
+        session_id = file_path.stem
+        chunks = _extract_jsonl_chunks(raw, session_id)
+        chunks = [c for c in chunks if c.content.strip()]
+        if not chunks:
             return
+        content = "\n\n".join(f"## {c.heading}\n{c.content}" for c in chunks)
+        title = None
     else:
         try:
             content = raw.decode("utf-8")
         except UnicodeDecodeError:
             return  # skip non-UTF-8 files
-
-    chunks = chunk_file(content)
-    if not chunks:
-        return
-
-    # Skip files that produce only empty chunks
-    chunks = [c for c in chunks if c.content.strip()]
-    if not chunks:
-        return
-
-    title = _extract_title(content)
+        chunks = chunk_file(content)
+        chunks = [c for c in chunks if c.content.strip()]
+        if not chunks:
+            return
+        title = _extract_title(content)
 
     # Build contextualized texts for FTS (with path/title prefix)
     ctx_texts = []
@@ -334,8 +497,8 @@ def index_file(
 
         for idx, (chunk, ctx_text, embedding) in enumerate(zip(chunks, ctx_texts, embeddings, strict=True)):
             cursor = conn.execute(
-                "INSERT INTO chunks (file_id, chunk_idx, content, raw_content) VALUES (?, ?, ?, ?)",
-                (file_id, idx, ctx_text, chunk.content),
+                "INSERT INTO chunks (file_id, chunk_idx, content, raw_content, metadata) VALUES (?, ?, ?, ?, ?)",
+                (file_id, idx, ctx_text, chunk.content, json.dumps(chunk.metadata)),
             )
             chunk_id = cursor.lastrowid
             conn.execute(
@@ -359,6 +522,14 @@ def index_file(
     except Exception:
         conn.execute("ROLLBACK TO SAVEPOINT sp_index_file")
         raise
+
+    # Post-index feedback analysis for JSONL sessions (best-effort)
+    if file_path.suffix == ".jsonl":
+        import contextlib
+
+        with contextlib.suppress(Exception):
+            analyze_session_feedback(conn, raw, file_path.stem, embedder)
+            conn.commit()
 
 
 def _remove_file(conn: sqlite3.Connection, file_path: str) -> None:

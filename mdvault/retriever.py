@@ -19,6 +19,7 @@ def bm25_search(
     top_k: int = 50,
     source: str | None = None,
     namespace: str | None = None,
+    role: str | None = None,
 ) -> list[dict]:
     """FTS5 BM25 search. Returns ranked results (best first)."""
     # Build FTS5 query: bigrams (boosted via NEAR) + unigrams for partial matches
@@ -42,6 +43,9 @@ def bm25_search(
     if namespace is not None:
         source_clause += " AND f.file_path LIKE ?"
         params.append(f"memory://{namespace}/%")
+    if role is not None:
+        source_clause += " AND json_extract(c.metadata, '$.role') = ?"
+        params.append(role)
     params.append(top_k)
 
     try:
@@ -74,6 +78,7 @@ def vector_search(
     top_k: int = 50,
     source: str | None = None,
     namespace: str | None = None,
+    role: str | None = None,
 ) -> list[dict]:
     """sqlite-vec exact nearest neighbor search. Returns ranked by distance (closest first)."""
     # Fetch extra results when filtering, since sqlite-vec doesn't support WHERE clauses
@@ -97,14 +102,16 @@ def vector_search(
 
     chunk_ids = [row["chunk_id"] for row in rows]
     placeholders = ",".join("?" * len(chunk_ids))
+    role_clause = " AND json_extract(c.metadata, '$.role') = ?" if role else ""
+    role_params = [role] if role else []
     details = conn.execute(
         f"""
-        SELECT c.id, c.chunk_idx, c.content, c.raw_content, f.file_path
+        SELECT c.id, c.chunk_idx, c.content, c.raw_content, c.metadata, f.file_path
         FROM chunks c
         JOIN files f ON f.id = c.file_id
-        WHERE c.id IN ({placeholders})
+        WHERE c.id IN ({placeholders}){role_clause}
         """,
-        chunk_ids,
+        [*chunk_ids, *role_params],
     ).fetchall()
     detail_map = {d["id"]: d for d in details}
 
@@ -275,11 +282,12 @@ def hybrid_search(
     expand_model: str = "qwen3:0.6b",
     source: str | None = None,
     namespace: str | None = None,
+    role: str | None = None,
     _internal: bool = False,
 ) -> list[dict]:
     """Full hybrid search: BM25 + vector + RRF fusion. Optional LLM query expansion."""
     # BM25 always uses original query (lexical match)
-    bm25_results = bm25_search(conn, query, top_k=75, source=source, namespace=namespace)
+    bm25_results = bm25_search(conn, query, top_k=75, source=source, namespace=namespace, role=role)
 
     # Vector search: optionally use expanded query for richer embedding
     vec_query = query
@@ -289,7 +297,7 @@ def hybrid_search(
             vec_query = f"{query} {expanded}"
 
     query_vec = embedder([vec_query])[0]
-    vec_results = vector_search(conn, query_vec, top_k=75, source=source, namespace=namespace)
+    vec_results = vector_search(conn, query_vec, top_k=75, source=source, namespace=namespace, role=role)
     # Fuse with extra headroom, then dedup by content hash to avoid duplicated files
     fused = rrf_fusion(bm25_results, vec_results, top_k=top_k * 15, k=15)
 
