@@ -1,4 +1,5 @@
 import hashlib
+from pathlib import Path
 
 from mdvault.db import get_connection, init_db
 from mdvault.indexer import (
@@ -304,6 +305,93 @@ def test_keep_deleted_retains_pruned_file(tmp_path, mock_embedder):
 
     paths = {row["file_path"] for row in conn.execute("SELECT file_path FROM files").fetchall()}
     assert paths == {"vault/projects/session.md"}
+    conn.close()
+
+
+def test_keep_deleted_full_reindex_preserves_matching(tmp_path, mock_embedder):
+    """--full honors keep_deleted: matching entries survive the wipe."""
+    vault = tmp_path / "vault"
+    vault.mkdir()
+    (vault / "projects").mkdir()
+    transient = vault / "projects" / "session.md"
+    transient.write_text("## Session\n\nA reasonably long body with enough words to chunk for indexing tests.\n")
+    persistent = vault / "skills" / "skill.md"
+    persistent.parent.mkdir()
+    persistent.write_text("## Skill\n\nA reasonably long body with enough words to chunk for indexing tests.\n")
+
+    db_p = tmp_path / "test.db"
+    init_db(db_p)
+    conn = get_connection(db_p)
+    index_directory(conn, vault, mock_embedder, full=True, keep_deleted=["projects"])
+    conn.commit()
+
+    # Source vanishes, then user runs --full. The transient entry must remain.
+    transient.unlink()
+    index_directory(conn, vault, mock_embedder, full=True, keep_deleted=["projects"])
+    conn.commit()
+
+    paths = {row["file_path"] for row in conn.execute("SELECT file_path FROM files").fetchall()}
+    assert "vault/projects/session.md" in paths
+    assert "vault/skills/skill.md" in paths
+    conn.close()
+
+
+def test_keep_deleted_persists_across_reindex(tmp_path, mock_embedder):
+    """Patterns stored at index time are reused by reindex without re-passing them."""
+    from mdvault.cli import _parse_keep_deleted
+
+    vault = tmp_path / "vault"
+    vault.mkdir()
+    (vault / "projects").mkdir()
+    (vault / "projects" / "session.md").write_text(
+        "## Session\n\nLog body with enough words to form a valid indexable chunk for tests.\n"
+    )
+
+    db_p = tmp_path / "test.db"
+    init_db(db_p)
+    conn = get_connection(db_p)
+    index_directory(conn, vault, mock_embedder, full=True, keep_deleted=["projects", "*.jsonl"])
+    conn.commit()
+
+    stored = conn.execute("SELECT value FROM vault_config WHERE key = ?", ("keep_deleted:vault",)).fetchone()["value"]
+    assert _parse_keep_deleted(stored) == ["projects", "*.jsonl"]
+
+    # Backward-compat: legacy newline-separated value still parses.
+    assert _parse_keep_deleted("projects\n*.jsonl") == ["projects", "*.jsonl"]
+    assert _parse_keep_deleted("") == []
+    conn.close()
+
+
+def test_modified_file_unreadable_keeps_entry(tmp_path, mock_embedder, monkeypatch):
+    """A read failure on an updated file must not drop the existing index entry."""
+    vault = tmp_path / "vault"
+    vault.mkdir()
+    f = vault / "note.md"
+    f.write_text("## V1\n\nFirst version body with enough words to chunk for indexing tests properly.\n")
+
+    db_p = tmp_path / "test.db"
+    init_db(db_p)
+    conn = get_connection(db_p)
+    index_directory(conn, vault, mock_embedder, full=True)
+    conn.commit()
+    assert conn.execute("SELECT COUNT(*) as c FROM files").fetchone()["c"] == 1
+
+    # Mutate file (so hash changes), then make read_bytes fail mid-reindex.
+    f.write_text("## V2\n\nSecond version body with enough words to chunk for indexing tests properly.\n")
+
+    real_read_bytes = Path.read_bytes
+
+    def flaky(self):
+        if self == f:
+            raise OSError("simulated read failure")
+        return real_read_bytes(self)
+
+    monkeypatch.setattr(Path, "read_bytes", flaky)
+    index_directory(conn, vault, mock_embedder, keep_deleted=["note.md"])
+    conn.commit()
+
+    # Entry still present (not deleted by the failed update path).
+    assert conn.execute("SELECT COUNT(*) as c FROM files").fetchone()["c"] == 1
     conn.close()
 
 

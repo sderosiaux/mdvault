@@ -18,6 +18,22 @@ from mdvault.retriever import related_notes as _related_notes
 app = typer.Typer(add_completion=False)
 
 
+def _parse_keep_deleted(stored: str) -> list[str]:
+    """Read patterns persisted in vault_config.
+
+    Current format is a JSON array; pre-0.5 wrote newline-separated. Both are
+    accepted so existing DBs keep working without an explicit migration.
+    """
+    if not stored:
+        return []
+    if stored.lstrip().startswith("["):
+        with contextlib.suppress(ValueError):
+            value = _json.loads(stored)
+            if isinstance(value, list):
+                return [str(p) for p in value if str(p).strip()]
+    return [p for p in stored.splitlines() if p.strip()]
+
+
 def _resolve_db(db: str | None = None) -> Path:
     """Resolve DB path: --db flag > VAULT_DB env > platformdirs default."""
     if db:
@@ -158,10 +174,7 @@ def reindex(
     opts_rows = conn.execute("SELECT key, value FROM vault_config WHERE key LIKE 'vault_opts:%'").fetchall()
     vault_opts = {row["key"].removeprefix("vault_opts:"): row["value"] for row in opts_rows}
     keep_rows = conn.execute("SELECT key, value FROM vault_config WHERE key LIKE 'keep_deleted:%'").fetchall()
-    keep_map = {
-        row["key"].removeprefix("keep_deleted:"): [p for p in row["value"].split("\n") if p.strip()]
-        for row in keep_rows
-    }
+    keep_map = {row["key"].removeprefix("keep_deleted:"): _parse_keep_deleted(row["value"]) for row in keep_rows}
 
     embedder = _get_embedder()
     results = []

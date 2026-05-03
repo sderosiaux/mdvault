@@ -441,15 +441,21 @@ def index_file(
     file_path: Path,
     vault_root: Path,
     embedder: Callable[[list[str]], np.ndarray],
-) -> None:
-    """Index a single file (.md or .jsonl): insert into files, chunks, chunks_fts, chunks_vec."""
+    raw: bytes | None = None,
+) -> bool:
+    """Index a single file (.md or .jsonl): insert into files, chunks, chunks_fts, chunks_vec.
+
+    Returns True when a row was inserted, False when the file was skipped
+    (unreadable, non-UTF-8, no chunks). Pass ``raw`` to reuse already-read
+    bytes and avoid a redundant disk read.
+    """
     rel_path = f"{vault_root.name}/{file_path.relative_to(vault_root)}"
 
-    # Single read: hash + decode
-    try:
-        raw = file_path.read_bytes()
-    except (FileNotFoundError, OSError):
-        return  # skip broken symlinks or unreadable files
+    if raw is None:
+        try:
+            raw = file_path.read_bytes()
+        except (FileNotFoundError, OSError):
+            return False  # skip broken symlinks or unreadable files
     file_hash = hashlib.sha256(raw).hexdigest()
 
     if file_path.suffix == ".jsonl":
@@ -457,18 +463,18 @@ def index_file(
         chunks = _extract_jsonl_chunks(raw, session_id)
         chunks = [c for c in chunks if c.content.strip()]
         if not chunks:
-            return
+            return False
         content = "\n\n".join(f"## {c.heading}\n{c.content}" for c in chunks)
         title = None
     else:
         try:
             content = raw.decode("utf-8")
         except UnicodeDecodeError:
-            return  # skip non-UTF-8 files
+            return False  # skip non-UTF-8 files
         chunks = chunk_file(content)
         chunks = [c for c in chunks if c.content.strip()]
         if not chunks:
-            return
+            return False
         title = _extract_title(content)
 
     # Build contextualized texts for FTS (with path/title prefix)
@@ -524,13 +530,17 @@ def index_file(
         conn.execute("ROLLBACK TO SAVEPOINT sp_index_file")
         raise
 
-    # Post-index feedback analysis for JSONL sessions (best-effort)
+    # Post-index feedback analysis for JSONL sessions (best-effort).
+    # No explicit commit here: the caller's batch loop commits, and an inner
+    # commit would release outer savepoints used by index_directory's
+    # atomic replace path.
     if file_path.suffix == ".jsonl":
         import contextlib
 
         with contextlib.suppress(Exception):
             analyze_session_feedback(conn, raw, file_path.stem, embedder)
-            conn.commit()
+
+    return True
 
 
 def _remove_file(conn: sqlite3.Connection, file_path: str) -> None:
@@ -550,22 +560,42 @@ def _remove_file(conn: sqlite3.Connection, file_path: str) -> None:
     conn.execute("DELETE FROM files WHERE file_path = ?", (file_path,))
 
 
-def _remove_vault_files(conn: sqlite3.Connection, vault_name: str) -> None:
-    """Remove all files (and their chunks/links) belonging to a vault prefix."""
+def _remove_vault_files(
+    conn: sqlite3.Connection,
+    vault_name: str,
+    keep_patterns: list[str] | None = None,
+) -> None:
+    """Remove all files (and their chunks/links) belonging to a vault prefix.
+
+    When ``keep_patterns`` is provided, rows whose path matches any pattern
+    are preserved — this lets ``--full`` rebuild from disk while keeping
+    transient-source entries (e.g. rotated session logs) intact.
+    """
     pattern = f"{vault_name}/%"
-    conn.execute(
-        "DELETE FROM chunks_fts WHERE rowid IN ("
-        "  SELECT c.id FROM chunks c JOIN files f ON c.file_id = f.id WHERE f.file_path LIKE ?"
-        ")",
+    if not keep_patterns:
+        conn.execute(
+            "DELETE FROM chunks_fts WHERE rowid IN ("
+            "  SELECT c.id FROM chunks c JOIN files f ON c.file_id = f.id WHERE f.file_path LIKE ?"
+            ")",
+            (pattern,),
+        )
+        conn.execute(
+            "DELETE FROM chunks_vec WHERE rowid IN ("
+            "  SELECT c.id FROM chunks c JOIN files f ON c.file_id = f.id WHERE f.file_path LIKE ?"
+            ")",
+            (pattern,),
+        )
+        conn.execute("DELETE FROM files WHERE file_path LIKE ?", (pattern,))
+        return
+
+    rows = conn.execute(
+        "SELECT file_path FROM files WHERE file_path LIKE ?",
         (pattern,),
-    )
-    conn.execute(
-        "DELETE FROM chunks_vec WHERE rowid IN ("
-        "  SELECT c.id FROM chunks c JOIN files f ON c.file_id = f.id WHERE f.file_path LIKE ?"
-        ")",
-        (pattern,),
-    )
-    conn.execute("DELETE FROM files WHERE file_path LIKE ?", (pattern,))
+    ).fetchall()
+    for row in rows:
+        rel_in_vault = row["file_path"].split("/", 1)[1] if "/" in row["file_path"] else row["file_path"]
+        if not _matches_keep_deleted(rel_in_vault, keep_patterns):
+            _remove_file(conn, row["file_path"])
 
 
 def _matches_keep_deleted(rel_in_vault: str, patterns: list[str]) -> bool:
@@ -628,13 +658,15 @@ def index_directory(
     keep_patterns = [p for p in (keep_deleted or []) if p.strip()]
     conn.execute(
         "INSERT OR REPLACE INTO vault_config (key, value) VALUES (?, ?)",
-        (f"keep_deleted:{vault_name}", "\n".join(keep_patterns)),
+        (f"keep_deleted:{vault_name}", json.dumps(keep_patterns)),
     )
 
     md_files = _list_files(vault_root, no_gitignore=no_gitignore)
 
     if full:
-        _remove_vault_files(conn, vault_name)
+        # Honor keep_deleted on --full so transient-source entries survive
+        # a forced rebuild. To wipe everything, call without keep_deleted.
+        _remove_vault_files(conn, vault_name, keep_patterns=keep_patterns)
         conn.commit()
 
     # Build set of expected disk paths (prefixed)
@@ -665,17 +697,35 @@ def index_directory(
         batch = md_files[batch_start : batch_start + 100]
         for fp in batch:
             rel_path = f"{vault_name}/{fp.relative_to(vault_root)}"
+            rel_in_vault = str(fp.relative_to(vault_root))
+            if rel_path not in db_files:
+                index_file(conn, fp, vault_root, embedder)
+                continue
+
+            # Hash the on-disk file. If the read fails, the existing DB row
+            # is preserved (gated by keep_deleted, so non-transient stale
+            # rows still get pruned).
             try:
-                if rel_path not in db_files:
-                    index_file(conn, fp, vault_root, embedder)
-                elif db_files[rel_path] != compute_sha256(fp):
+                raw = fp.read_bytes()
+            except (FileNotFoundError, OSError):
+                if not _matches_keep_deleted(rel_in_vault, keep_patterns):
                     _remove_file(conn, rel_path)
-                    index_file(conn, fp, vault_root, embedder)
-            except FileNotFoundError:
-                # File vanished mid-run (rotation): apply same keep-deleted gate
-                rel_in_vault = str(fp.relative_to(vault_root))
-                if rel_path in db_files and not _matches_keep_deleted(rel_in_vault, keep_patterns):
-                    _remove_file(conn, rel_path)
+                continue
+
+            if hashlib.sha256(raw).hexdigest() == db_files[rel_path]:
+                continue
+
+            # Replace atomically: only delete the old row once we've read the
+            # new bytes successfully. The savepoint guards the swap so an
+            # embedder failure mid-replace doesn't leave the file unindexed.
+            conn.execute("SAVEPOINT sp_replace")
+            try:
+                _remove_file(conn, rel_path)
+                index_file(conn, fp, vault_root, embedder, raw=raw)
+                conn.execute("RELEASE SAVEPOINT sp_replace")
+            except Exception:
+                conn.execute("ROLLBACK TO SAVEPOINT sp_replace")
+                raise
         conn.commit()
         if show_progress:
             done = min(batch_start + len(batch), total)

@@ -91,8 +91,10 @@ mdvault index ~/.claude/
 # Incremental update (only changed/new/deleted files)
 mdvault index ~/.claude/ --incremental
 
-# Retain entries when matching files are removed from disk (repeatable)
+# Retain entries when matching files are removed from disk (repeatable).
 # Pattern is a path prefix or fnmatch glob, relative to the vault root.
+# --full also honors keep-deleted: it rebuilds from disk while preserving
+# matching entries. Drop the flag to wipe everything.
 mdvault index ~/.claude/ --keep-deleted projects --keep-deleted '*.jsonl'
 
 # Search

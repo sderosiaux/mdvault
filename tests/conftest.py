@@ -15,13 +15,19 @@ def _prewarm_embedder():
 
     Subsequent ``runner.invoke`` calls hit a warm cache, so no download
     progress bars leak into ``result.output`` and break ``json.loads``.
+    Tolerant to offline / no-cache: tests that genuinely need the real
+    embedder (CLI tests via runner.invoke) will fail naturally with a
+    clearer error if the model is unavailable.
     """
     os.environ.setdefault("HF_HUB_DISABLE_PROGRESS_BARS", "1")
     os.environ.setdefault("TRANSFORMERS_VERBOSITY", "error")
     os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
-    from mdvault.cli import _get_embedder
+    try:
+        from mdvault.cli import _get_embedder
 
-    _get_embedder()
+        _get_embedder()
+    except Exception:  # noqa: S110 - tests using the real embedder fail naturally if download is impossible
+        pass
 
 
 @pytest.fixture
