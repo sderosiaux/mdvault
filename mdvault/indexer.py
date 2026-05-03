@@ -633,11 +633,16 @@ def index_directory(
         batch = md_files[batch_start : batch_start + 100]
         for fp in batch:
             rel_path = f"{vault_name}/{fp.relative_to(vault_root)}"
-            if rel_path not in db_files:
-                index_file(conn, fp, vault_root, embedder)
-            elif db_files[rel_path] != compute_sha256(fp):
-                _remove_file(conn, rel_path)
-                index_file(conn, fp, vault_root, embedder)
+            try:
+                if rel_path not in db_files:
+                    index_file(conn, fp, vault_root, embedder)
+                elif db_files[rel_path] != compute_sha256(fp):
+                    _remove_file(conn, rel_path)
+                    index_file(conn, fp, vault_root, embedder)
+            except FileNotFoundError:
+                # File disappeared between listing and read (e.g. rotated logs)
+                if rel_path in db_files:
+                    _remove_file(conn, rel_path)
         conn.commit()
         if show_progress:
             done = min(batch_start + len(batch), total)
