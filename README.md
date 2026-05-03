@@ -34,6 +34,9 @@ uv tool install mdvault
 **2. Index your notes**
 ```bash
 mdvault index ~/.claude/
+
+# Keep rotated session logs in the index even after Claude Code deletes them
+mdvault index ~/.claude/ --keep-deleted projects
 ```
 
 **3. Add MCP server** to `~/.claude/mcp.json`:
@@ -87,6 +90,10 @@ mdvault index ~/.claude/
 
 # Incremental update (only changed/new/deleted files)
 mdvault index ~/.claude/ --incremental
+
+# Retain entries when matching files are removed from disk (repeatable)
+# Pattern is a path prefix or fnmatch glob, relative to the vault root.
+mdvault index ~/.claude/ --keep-deleted projects --keep-deleted '*.jsonl'
 
 # Search
 mdvault search "nginx reverse proxy config"

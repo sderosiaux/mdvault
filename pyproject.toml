@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "mdvault"
-version = "0.3.0"
+version = "0.4.0"
 description = "CLI + MCP server for hybrid BM25 + semantic search over local Markdown vaults"
 readme = "README.md"
 license = { file = "LICENSE" }
@@ -95,6 +95,9 @@ ignore = [
 
 [tool.ruff.lint.flake8-bandit]
 check-typed-exception = true
+
+[tool.ruff.lint.flake8-bugbear]
+extend-immutable-calls = ["typer.Option", "typer.Argument"]
 
 [tool.ruff.lint.flake8-tidy-imports]
 ban-relative-imports = "all"

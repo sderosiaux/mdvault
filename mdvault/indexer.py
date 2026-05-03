@@ -1,3 +1,4 @@
+import fnmatch
 import hashlib
 import json
 import posixpath
@@ -567,12 +568,33 @@ def _remove_vault_files(conn: sqlite3.Connection, vault_name: str) -> None:
     conn.execute("DELETE FROM files WHERE file_path LIKE ?", (pattern,))
 
 
+def _matches_keep_deleted(rel_in_vault: str, patterns: list[str]) -> bool:
+    """True if a path matches any keep-deleted pattern.
+
+    Pattern semantics:
+    - Bare prefix (e.g. ``projects`` or ``projects/``) matches anything under that directory.
+    - Trailing ``*`` / ``**`` is stripped, then prefix-matched.
+    - Otherwise, ``fnmatch`` glob (e.g. ``*.jsonl``).
+    """
+    for raw in patterns:
+        p = raw.strip()
+        if not p:
+            continue
+        prefix = p.rstrip("*").rstrip("/")
+        if prefix and (rel_in_vault == prefix or rel_in_vault.startswith(prefix + "/")):
+            return True
+        if fnmatch.fnmatchcase(rel_in_vault, p):
+            return True
+    return False
+
+
 def index_directory(
     conn: sqlite3.Connection,
     vault_root: Path,
     embedder: Callable[[list[str]], np.ndarray],
     full: bool = False,
     no_gitignore: bool = False,
+    keep_deleted: list[str] | None = None,
 ) -> None:
     """Index all .md files under vault_root. Additive by default (per-vault incremental)."""
     if not vault_root.exists():
@@ -603,6 +625,11 @@ def index_directory(
         "INSERT OR REPLACE INTO vault_config (key, value) VALUES (?, ?)",
         (f"vault_opts:{vault_name}", "no_gitignore" if no_gitignore else ""),
     )
+    keep_patterns = [p for p in (keep_deleted or []) if p.strip()]
+    conn.execute(
+        "INSERT OR REPLACE INTO vault_config (key, value) VALUES (?, ?)",
+        (f"keep_deleted:{vault_name}", "\n".join(keep_patterns)),
+    )
 
     md_files = _list_files(vault_root, no_gitignore=no_gitignore)
 
@@ -622,9 +649,14 @@ def index_directory(
         ).fetchall()
     }
 
-    # Remove deleted files (in DB but not on disk)
+    # Prune files that disappeared from disk, unless they match a keep-deleted
+    # pattern. Use case: ~/.claude/projects/*.jsonl session logs are rotated
+    # away by Claude Code, but we want their indexed content to remain
+    # searchable. Skills/commands/knowledge are user-owned and prune normally.
     for deleted_path in set(db_files.keys()) - disk_paths:
-        _remove_file(conn, deleted_path)
+        rel_in_vault = deleted_path.split("/", 1)[1] if "/" in deleted_path else deleted_path
+        if not _matches_keep_deleted(rel_in_vault, keep_patterns):
+            _remove_file(conn, deleted_path)
 
     total = len(md_files)
     show_progress = sys.stderr.isatty() and total > 50
@@ -640,8 +672,9 @@ def index_directory(
                     _remove_file(conn, rel_path)
                     index_file(conn, fp, vault_root, embedder)
             except FileNotFoundError:
-                # File disappeared between listing and read (e.g. rotated logs)
-                if rel_path in db_files:
+                # File vanished mid-run (rotation): apply same keep-deleted gate
+                rel_in_vault = str(fp.relative_to(vault_root))
+                if rel_path in db_files and not _matches_keep_deleted(rel_in_vault, keep_patterns):
                     _remove_file(conn, rel_path)
         conn.commit()
         if show_progress:

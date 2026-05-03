@@ -278,6 +278,47 @@ def test_additive_removes_deleted_file(tmp_path, mock_embedder):
     conn.close()
 
 
+def test_keep_deleted_retains_pruned_file(tmp_path, mock_embedder):
+    """Files matching --keep-deleted survive disappearance from disk."""
+    vault = tmp_path / "vault"
+    vault.mkdir()
+    (vault / "projects").mkdir()
+    transient = vault / "projects" / "session.md"
+    transient.write_text("## Session\n\nSession log content with enough words to form a valid indexable chunk.\n")
+    persistent = vault / "skills" / "skill.md"
+    persistent.parent.mkdir()
+    persistent.write_text("## Skill\n\nSkill body with enough words to form a valid indexable chunk for testing.\n")
+
+    db_p = tmp_path / "test.db"
+    init_db(db_p)
+    conn = get_connection(db_p)
+    index_directory(conn, vault, mock_embedder, full=True, keep_deleted=["projects"])
+    conn.commit()
+    assert conn.execute("SELECT COUNT(*) as c FROM files").fetchone()["c"] == 2
+
+    # Both files vanish; only the non-matching one should be pruned.
+    transient.unlink()
+    persistent.unlink()
+    index_directory(conn, vault, mock_embedder, keep_deleted=["projects"])
+    conn.commit()
+
+    paths = {row["file_path"] for row in conn.execute("SELECT file_path FROM files").fetchall()}
+    assert paths == {"vault/projects/session.md"}
+    conn.close()
+
+
+def test_keep_deleted_pattern_matching():
+    """Pattern matcher: prefix semantics + fnmatch fallback."""
+    from mdvault.indexer import _matches_keep_deleted
+
+    assert _matches_keep_deleted("projects/uuid/log.jsonl", ["projects"])
+    assert _matches_keep_deleted("projects", ["projects"])
+    assert not _matches_keep_deleted("skills/foo.md", ["projects"])
+    assert _matches_keep_deleted("foo.jsonl", ["*.jsonl"])
+    assert _matches_keep_deleted("a/b/c.jsonl", ["a/b"])
+    assert not _matches_keep_deleted("ab/c.jsonl", ["a"])
+
+
 def test_additive_adds_new_file(tmp_path, mock_embedder):
     """Index -> add new .md -> additive -> new file indexed."""
     vault = tmp_path / "vault"

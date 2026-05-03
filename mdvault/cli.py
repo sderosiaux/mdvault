@@ -79,6 +79,15 @@ def index(
     db: str | None = typer.Option(None, "--db", help="Path to database file"),
     full: bool = typer.Option(False, "--full", help="Force full re-index of this vault (default: additive)"),
     no_gitignore: bool = typer.Option(False, "--no-gitignore", help="Ignore .gitignore rules (index all .md files)"),
+    keep_deleted: list[str] | None = typer.Option(
+        None,
+        "--keep-deleted",
+        help=(
+            "Glob/prefix relative to the vault root. Files matching it are kept in the index "
+            "even after they're removed from disk (e.g. 'projects' to retain rotated Claude "
+            "session logs). Repeatable."
+        ),
+    ),
     json: bool = typer.Option(False, "--json", "-j", help="Output JSON"),
 ):
     """Index a directory of markdown files. Additive by default — multiple vaults can share one DB."""
@@ -96,7 +105,14 @@ def index(
     init_db(db_path)
     conn = get_connection(db_path)
 
-    index_directory(conn, vault_root, embedder, full=full, no_gitignore=no_gitignore)
+    index_directory(
+        conn,
+        vault_root,
+        embedder,
+        full=full,
+        no_gitignore=no_gitignore,
+        keep_deleted=keep_deleted or [],
+    )
     conn.commit()
 
     file_count = conn.execute("SELECT COUNT(*) as c FROM files").fetchone()["c"]
@@ -141,6 +157,11 @@ def reindex(
     # Read per-vault options
     opts_rows = conn.execute("SELECT key, value FROM vault_config WHERE key LIKE 'vault_opts:%'").fetchall()
     vault_opts = {row["key"].removeprefix("vault_opts:"): row["value"] for row in opts_rows}
+    keep_rows = conn.execute("SELECT key, value FROM vault_config WHERE key LIKE 'keep_deleted:%'").fetchall()
+    keep_map = {
+        row["key"].removeprefix("keep_deleted:"): [p for p in row["value"].split("\n") if p.strip()]
+        for row in keep_rows
+    }
 
     embedder = _get_embedder()
     results = []
@@ -150,7 +171,14 @@ def reindex(
             typer.echo(f"Warning: {name} ({path}) no longer exists, skipping.", err=True)
             continue
         no_gitignore = "no_gitignore" in vault_opts.get(name, "")
-        index_directory(conn, vault_root, embedder, full=full, no_gitignore=no_gitignore)
+        index_directory(
+            conn,
+            vault_root,
+            embedder,
+            full=full,
+            no_gitignore=no_gitignore,
+            keep_deleted=keep_map.get(name, []),
+        )
         conn.commit()
         v_files = conn.execute("SELECT COUNT(*) as c FROM files WHERE file_path LIKE ?", (f"{name}/%",)).fetchone()["c"]
         v_chunks = conn.execute(
